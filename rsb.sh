@@ -5,4 +5,4 @@
 
 set -e
 
-gfff && { git pull --ff-only && cargo build --release ;} || echo "Already up to date!"
+gfff && { git pull --ff-only && cargo build --release ;} || { echo "Already up to date!"; false ;}
