@@ -1,0 +1,15 @@
+[Unit]
+Description=gfff buildbot scheduler (pueue)
+Wants=pueued.service
+After=pueued.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/gfff
+ExecStart=/usr/bin/python3 %h/dev/gfff/buildbot.py --config %h/dev/gfff/gfff.yaml --group-prefix gfff --tick 5
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

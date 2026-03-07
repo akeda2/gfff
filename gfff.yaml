@@ -1,0 +1,20 @@
+- name: fresh
+  active: true
+  path: ~/dev/fresh
+  build: cargo build --release
+  interval: 3600
+  cleanup: cargo clean
+- name: pueue
+  active: true
+  path: ~/dev/pueue
+  build: ./inst.sh
+  interval: 1200
+  cleanup: cargo clean
+- name: ComfyUI
+  active: false
+  path: ~/dev/ComfyUI
+  pre-build: . venv/bin/activate
+  build: pip3 install -r requirements.txt
+  post-build: deactivate
+  interval: 3600
+  cleanup: rm -rf venv
