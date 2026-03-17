@@ -9,7 +9,7 @@ WorkingDirectory=%h/dev/fresh
 ExecStart=%h/dev/gfff/wrsb.sh
 Restart=on-failure
 RestartSec=10
-#Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=default.target
