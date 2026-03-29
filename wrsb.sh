@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Use watch and pueue to schedule repo checks and trigger builds
-SLEEP=3600
+SLEEP=900
 #set -e
 #watch -cwt -n $SLEEP "pueue add -g rsb rsb"
 
