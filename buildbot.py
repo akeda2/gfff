@@ -268,22 +268,6 @@ def extract_task_state(task: Dict[str, Any]) -> str:
     return "Unknown"
 
 
-def get_pending_groups(status_data: Dict[str, Any]) -> set[str]:
-    tasks = status_data.get("tasks", {})
-
-    pending_states = {"Queued", "Running", "Paused", "Stashed", "Locked"}
-    pending_groups: set[str] = set()
-
-    for task in tasks.values():
-        group = task.get("group")
-        state = extract_task_state(task)
-
-        if group and state in pending_states:
-            pending_groups.add(str(group))
-
-    return pending_groups
-
-
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
     cmd = [
@@ -388,22 +372,13 @@ def run_loop(
     tracked_tasks: Dict[int, Dict[str, str]] = {}
 
     while True:
-        pending_groups: set[str] = set()
         if not dry_run:
             status_data = get_pueue_status()
             log_finished_task_outcomes(status_data, tracked_tasks)
-            pending_groups = get_pending_groups(status_data)
 
         loop_now = time.time()
         for job in jobs:
             if loop_now < next_runs[job["slug"]]:
-                continue
-
-            if shared_group in pending_groups:
-                log_event(
-                    "INFO",
-                    f"skip [{job['name']}]: group {shared_group} still has queued/running task"
-                )
                 continue
 
             if prepare_repo_for_build(job, dry_run=dry_run):
@@ -413,7 +388,6 @@ def run_loop(
                         "job_name": str(job["name"]),
                         "manual_install_cmd": str(job.get("manual_install_cmd", "")),
                     }
-                pending_groups.add(shared_group)
                 next_runs[job["slug"]] = loop_now + int(job["interval"])
                 # Keep at most one queued build added per scheduler pass.
                 break
