@@ -177,6 +177,11 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
     git_pull = str(job.get("git_pull", "git pull --ff-only"))
     git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
 
+    repo_path = Path(str(job["path"]))
+    if not repo_path.is_dir():
+        log_event("ERROR", f"skip {label}: path does not exist: {repo_path}")
+        return False
+
     if dry_run:
         print(f"DRY RUN: ({job['path']}) git fetch")
         print(
