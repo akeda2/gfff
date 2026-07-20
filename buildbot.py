@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 
 def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
@@ -42,6 +42,18 @@ def sanitize_name(name: str) -> str:
     return cleaned.strip("-") or "job"
 
 
+def parse_bool(value: Any, field: str, job_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"Job '{job_name}' has invalid '{field}': {value}")
+
+
 def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for idx, job in enumerate(jobs, start=1):
@@ -66,6 +78,8 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if interval_s <= 0:
             raise ValueError(f"Job '{name}' must have interval > 0")
 
+        git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
+
         normalized.append(
             {
                 "name": name,
@@ -76,6 +90,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "cleanup": str(job.get("cleanup", "")).strip(),
                 "pre_build": str(job.get("pre-build", "")).strip(),
                 "post_build": str(job.get("post-build", "")).strip(),
+                "git_strict": git_strict,
             }
         )
 
@@ -110,17 +125,42 @@ def set_group_parallelism(group: str, dry_run: bool) -> None:
 
 
 def generate_job_script(job: Dict[str, Any]) -> str:
+    label = "[" + job["name"] + "]"
+    strict = bool(job.get("git_strict", True))
+
     lines = [
         "set -e",
         f"cd {shlex.quote(job['path'])}",
-        "git fetch",
+        (
+            "git fetch"
+            if strict
+            else (
+                "git fetch || { echo "
+                + shlex.quote(label + " git fetch failed; skipping build")
+                + "; exit 0; }"
+            )
+        ),
+        (
+            "git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1 "
+            "|| { echo "
+            + shlex.quote(label + " no upstream branch; skipping build")
+            + "; exit 0; }"
+        ),
         "local_head=$(git rev-parse HEAD)",
         "remote_head=$(git rev-parse @{u})",
         'if [ "$local_head" = "$remote_head" ]; then',
-        f"  echo {shlex.quote('[' + job['name'] + '] up to date; skipping build')}",
+        f"  echo {shlex.quote(label + ' up to date; skipping build')}",
         "  exit 0",
         "fi",
-        "git pull --ff-only",
+        (
+            "git pull --ff-only"
+            if strict
+            else (
+                "git pull --ff-only || { echo "
+                + shlex.quote(label + " git pull failed; skipping build")
+                + "; exit 0; }"
+            )
+        ),
     ]
 
     if job["cleanup"]:
@@ -199,7 +239,7 @@ def run_loop(
         return 0
 
     now = time.time()
-    next_runs = {job["name"]: now for job in jobs}
+    next_runs = {job["slug"]: now for job in jobs}
 
     while True:
         pending_groups: set[str] = set()
@@ -208,7 +248,7 @@ def run_loop(
 
         loop_now = time.time()
         for job in jobs:
-            if loop_now < next_runs[job["name"]]:
+            if loop_now < next_runs[job["slug"]]:
                 continue
 
             group = f"{group_prefix}-{job['slug']}"
@@ -217,7 +257,7 @@ def run_loop(
             else:
                 queue_job(job, group_prefix=group_prefix, dry_run=dry_run)
 
-            next_runs[job["name"]] = loop_now + int(job["interval"])
+            next_runs[job["slug"]] = loop_now + int(job["interval"])
 
         if run_once:
             return 0
@@ -258,8 +298,8 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: List[str]) -> int:
-    args = parse_args(argv)
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         check_dependencies()
         config_path = Path(args.config).expanduser().resolve()
@@ -286,4 +326,4 @@ def main(argv: List[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main())

@@ -6,7 +6,7 @@ After=pueued.service
 [Service]
 Type=simple
 WorkingDirectory=%h/dev/gfff
-ExecStart=/usr/bin/python3 %h/dev/gfff/buildbot.py --config %h/dev/gfff/gfff.yaml --group-prefix gfff --tick 5
+ExecStart=%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --config %h/dev/gfff/gfff.yaml --group-prefix gfff --tick 5
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1

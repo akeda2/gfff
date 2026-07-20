@@ -3,13 +3,11 @@
   path: ~/dev/fresh
   build: cargo build --release
   interval: 3600
-  cleanup: cargo clean
 - name: pueue
   active: false
   path: ~/dev/pueue
   build: ./inst.sh
   interval: 1200
-  cleanup: cargo clean
 - name: ComfyUI
   active: false
   path: ~/dev/ComfyUI
@@ -17,11 +15,8 @@
   build: pip3 install -r requirements.txt
   post-build: deactivate
   interval: 3600
-  cleanup: rm -rf venv
 - name: yt-dlp
   active: true
   path: ~/dev/yt-dlp
-  pre-build: git stash && git pull
   build: make
   interval: 3600
-  cleanup: make clean
