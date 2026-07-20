@@ -15,6 +15,7 @@
   git-remote-ref: origin/master
   git-pull: git pull origin master --ff-only
   build: make
+  manual-install-cmd: sudo make install
   interval: 3600
 - name: btop
   active: true
@@ -22,4 +23,5 @@
   git-remote-ref: origin/master
   git-pull: git pull origin master --ff-only
   build: gmake
+  manual-install-cmd: sudo gmake install
   interval: 3600

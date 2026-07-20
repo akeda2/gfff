@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
+def log_event(level: str, message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{timestamp} {level} {message}")
+
+
 def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
     try:
         import yaml  # type: ignore
@@ -99,6 +104,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "cleanup": str(job.get("cleanup", "")).strip(),
                 "pre_build": str(job.get("pre-build", "")).strip(),
                 "post_build": str(job.get("post-build", "")).strip(),
+                "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
                 "git_strict": git_strict,
                 "git_pull": git_pull,
                 "git_remote_ref": git_remote_ref,
@@ -181,7 +187,7 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         msg = fetch_result.stderr.strip() or fetch_result.stdout.strip() or "git fetch failed"
         if strict:
             raise RuntimeError(f"{label} {msg}")
-        print(f"skip {label}: git fetch failed ({msg})")
+        log_event("ERROR", f"skip {label}: git fetch failed ({msg})")
         return False
 
     remote_ref_check = run_repo_command(
@@ -191,7 +197,10 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         + " >/dev/null 2>&1",
     )
     if remote_ref_check.returncode != 0:
-        print(f"skip {label}: cannot resolve git-remote-ref {git_remote_ref}")
+        log_event(
+            "ERROR",
+            f"skip {label}: cannot resolve git-remote-ref {git_remote_ref}",
+        )
         return False
 
     local_head_result = run_repo_command(job, "git rev-parse HEAD")
@@ -199,7 +208,7 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         msg = local_head_result.stderr.strip() or local_head_result.stdout.strip() or "git rev-parse HEAD failed"
         if strict:
             raise RuntimeError(f"{label} {msg}")
-        print(f"skip {label}: failed to read local HEAD ({msg})")
+        log_event("ERROR", f"skip {label}: failed to read local HEAD ({msg})")
         return False
 
     remote_head_result = run_repo_command(job, "git rev-parse " + shlex.quote(git_remote_ref))
@@ -207,13 +216,19 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         msg = remote_head_result.stderr.strip() or remote_head_result.stdout.strip() or "git rev-parse remote ref failed"
         if strict:
             raise RuntimeError(f"{label} {msg}")
-        print(f"skip {label}: failed to read remote ref {git_remote_ref} ({msg})")
+        log_event(
+            "ERROR",
+            f"skip {label}: failed to read remote ref {git_remote_ref} ({msg})",
+        )
         return False
 
     local_head = local_head_result.stdout.strip()
     remote_head = remote_head_result.stdout.strip()
     if local_head == remote_head:
-        print(f"skip {label}: up to date")
+        log_event(
+            "INFO",
+            f"skip {label}: no git updates found for {git_remote_ref} (HEAD {local_head[:12]})",
+        )
         return False
 
     pull_result = run_repo_command(job, git_pull)
@@ -221,33 +236,41 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         msg = pull_result.stderr.strip() or pull_result.stdout.strip() or "git pull failed"
         if strict:
             raise RuntimeError(f"{label} {msg}")
-        print(f"skip {label}: git pull failed ({msg})")
+        log_event("ERROR", f"skip {label}: git pull failed ({msg})")
         return False
 
+    log_event("INFO", f"{label} updates found and pulled successfully")
     return True
 
 
-def get_pending_groups() -> set[str]:
+def get_pueue_status() -> Dict[str, Any]:
     result = subprocess.run(
         ["pueue", "status", "-j"], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
-    data = json.loads(result.stdout)
-    tasks = data.get("tasks", {})
+    return json.loads(result.stdout)
+
+
+def extract_task_state(task: Dict[str, Any]) -> str:
+    status = task.get("status")
+    if isinstance(status, str):
+        return status
+    if isinstance(status, dict) and status:
+        return str(next(iter(status.keys())))
+    return "Unknown"
+
+
+def get_pending_groups(status_data: Dict[str, Any]) -> set[str]:
+    tasks = status_data.get("tasks", {})
+
     pending_states = {"Queued", "Running", "Paused", "Stashed", "Locked"}
     pending_groups: set[str] = set()
 
     for task in tasks.values():
         group = task.get("group")
-        status = task.get("status")
-        state = ""
-
-        if isinstance(status, str):
-            state = status
-        elif isinstance(status, dict) and status:
-            state = next(iter(status.keys()))
+        state = extract_task_state(task)
 
         if group and state in pending_states:
             pending_groups.add(str(group))
@@ -255,18 +278,66 @@ def get_pending_groups() -> set[str]:
     return pending_groups
 
 
-def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> None:
+def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
     cmd = ["pueue", "add", "-g", group, "bash", "-lc", script]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
-        return
+        return None
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
-    print(f"queued [{job['name']}] in group {group}: {result.stdout.strip()}")
+    output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
+    task_id: Optional[int] = None
+
+    match = re.search(r"\(id\s+(\d+)\)", output)
+    if match:
+        task_id = int(match.group(1))
+
+    if task_id is not None:
+        log_event(
+            "INFO",
+            f"queued [{job['name']}] in group {group} as task {task_id}: {output}",
+        )
+    else:
+        log_event("INFO", f"queued [{job['name']}] in group {group}: {output}")
+
+    return task_id
+
+
+def log_finished_task_outcomes(
+    status_data: Dict[str, Any], tracked_tasks: Dict[int, Dict[str, str]]
+) -> None:
+    tasks = status_data.get("tasks", {})
+    pending_states = {"Queued", "Running", "Paused", "Stashed", "Locked"}
+
+    for task_id, task_meta in list(tracked_tasks.items()):
+        task = tasks.get(str(task_id)) or tasks.get(task_id)
+        if not isinstance(task, dict):
+            continue
+
+        state = extract_task_state(task)
+        if state in pending_states:
+            continue
+
+        job_name = task_meta["job_name"]
+        if state == "Done":
+            log_event("INFO", f"outcome [{job_name}]: task {task_id} completed successfully")
+            manual_install_cmd = task_meta.get("manual_install_cmd", "").strip()
+            if manual_install_cmd:
+                log_event(
+                    "ACTION",
+                    f"manual step required for [{job_name}]: run '{manual_install_cmd}'",
+                )
+        else:
+            log_event(
+                "ERROR",
+                f"outcome [{job_name}]: task {task_id} finished with state {state}. Check 'pueue log {task_id}'",
+            )
+
+        tracked_tasks.pop(task_id, None)
 
 
 def check_dependencies() -> None:
@@ -293,11 +364,14 @@ def run_loop(
 
     now = time.time()
     next_runs = {job["slug"]: now for job in jobs}
+    tracked_tasks: Dict[int, Dict[str, str]] = {}
 
     while True:
         pending_groups: set[str] = set()
         if not dry_run:
-            pending_groups = get_pending_groups()
+            status_data = get_pueue_status()
+            log_finished_task_outcomes(status_data, tracked_tasks)
+            pending_groups = get_pending_groups(status_data)
 
         loop_now = time.time()
         for job in jobs:
@@ -305,13 +379,19 @@ def run_loop(
                 continue
 
             if shared_group in pending_groups:
-                print(
+                log_event(
+                    "INFO",
                     f"skip [{job['name']}]: group {shared_group} still has queued/running task"
                 )
                 continue
 
             if prepare_repo_for_build(job, dry_run=dry_run):
-                queue_job(job, group=shared_group, dry_run=dry_run)
+                task_id = queue_job(job, group=shared_group, dry_run=dry_run)
+                if task_id is not None:
+                    tracked_tasks[task_id] = {
+                        "job_name": str(job["name"]),
+                        "manual_install_cmd": str(job.get("manual_install_cmd", "")),
+                    }
                 pending_groups.add(shared_group)
                 next_runs[job["slug"]] = loop_now + int(job["interval"])
                 # Keep at most one queued build added per scheduler pass.

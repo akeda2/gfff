@@ -30,6 +30,15 @@ Useful per-job git options:
 - `git-pull`: custom pull command per job, for example `git pull origin main --ff-only`
 - `git-remote-ref`: revision used for update detection, for example `origin/main`
 - `git-strict`: when `false`, fetch/pull failures skip that run instead of failing the task
+- `manual-install-cmd`: optional manual install command (for example sudo install steps) that is logged as an explicit action after a successful build task
+
+Logging now includes:
+
+- when no git updates are found for a job
+- git/pull related errors
+- when a job is added to `pueue` (including task id when available)
+- queued task outcome (`Done` vs non-success states)
+- required manual action line with the exact `manual-install-cmd`
 
 Example:
 
@@ -40,6 +49,7 @@ Example:
 	git-remote-ref: origin/release
 	git-pull: git pull origin release --ff-only
 	build: make
+	manual-install-cmd: sudo make install
 	interval: 3600
 ```
 
