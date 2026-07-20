@@ -6,6 +6,7 @@
 - name: pueue
   active: false
   path: ~/dev/pueue
+  git-remote-ref: akeda/inst
   build: ./inst.sh
   interval: 1200
 - name: ComfyUI
