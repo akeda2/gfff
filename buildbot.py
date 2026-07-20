@@ -135,51 +135,8 @@ def set_group_parallelism(group: str, dry_run: bool) -> None:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
-def generate_job_script(job: Dict[str, Any]) -> str:
-    label = "[" + job["name"] + "]"
-    strict = bool(job.get("git_strict", True))
-    git_pull = str(job.get("git_pull", "git pull --ff-only"))
-    git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
-
-    lines = [
-        "set -e",
-        f"cd {shlex.quote(job['path'])}",
-        (
-            "git fetch"
-            if strict
-            else (
-                "git fetch || { echo "
-                + shlex.quote(label + " git fetch failed; skipping build")
-                + "; exit 0; }"
-            )
-        ),
-        (
-            "git rev-parse --abbrev-ref --symbolic-full-name "
-            + shlex.quote(git_remote_ref)
-            + " >/dev/null 2>&1 "
-            "|| { echo "
-            + shlex.quote(
-                label + " cannot resolve git-remote-ref " + git_remote_ref + "; skipping build"
-            )
-            + "; exit 0; }"
-        ),
-        "local_head=$(git rev-parse HEAD)",
-        "remote_head=$(git rev-parse " + shlex.quote(git_remote_ref) + ")",
-        'if [ "$local_head" = "$remote_head" ]; then',
-        f"  echo {shlex.quote(label + ' up to date; skipping build')}",
-        "  exit 0",
-        "fi",
-        (
-            git_pull
-            if strict
-            else (
-                git_pull
-                + " || { echo "
-                + shlex.quote(label + " git pull failed; skipping build")
-                + "; exit 0; }"
-            )
-        ),
-    ]
+def generate_build_script(job: Dict[str, Any]) -> str:
+    lines = ["set -e", f"cd {shlex.quote(job['path'])}"]
 
     if job["cleanup"]:
         lines.append(job["cleanup"])
@@ -190,6 +147,84 @@ def generate_job_script(job: Dict[str, Any]) -> str:
         lines.append(job["post_build"])
 
     return "\n".join(lines)
+
+
+def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-lc", cmd],
+        cwd=job["path"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
+    label = "[" + job["name"] + "]"
+    strict = bool(job.get("git_strict", True))
+    git_pull = str(job.get("git_pull", "git pull --ff-only"))
+    git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
+
+    if dry_run:
+        print(f"DRY RUN: ({job['path']}) git fetch")
+        print(
+            "DRY RUN:",
+            f"({job['path']}) git rev-parse --abbrev-ref --symbolic-full-name {git_remote_ref}",
+        )
+        print("DRY RUN:", f"({job['path']}) git rev-parse HEAD")
+        print("DRY RUN:", f"({job['path']}) git rev-parse {git_remote_ref}")
+        print("DRY RUN:", f"({job['path']}) {git_pull}")
+        return True
+
+    fetch_result = run_repo_command(job, "git fetch")
+    if fetch_result.returncode != 0:
+        msg = fetch_result.stderr.strip() or fetch_result.stdout.strip() or "git fetch failed"
+        if strict:
+            raise RuntimeError(f"{label} {msg}")
+        print(f"skip {label}: git fetch failed ({msg})")
+        return False
+
+    remote_ref_check = run_repo_command(
+        job,
+        "git rev-parse --abbrev-ref --symbolic-full-name "
+        + shlex.quote(git_remote_ref)
+        + " >/dev/null 2>&1",
+    )
+    if remote_ref_check.returncode != 0:
+        print(f"skip {label}: cannot resolve git-remote-ref {git_remote_ref}")
+        return False
+
+    local_head_result = run_repo_command(job, "git rev-parse HEAD")
+    if local_head_result.returncode != 0:
+        msg = local_head_result.stderr.strip() or local_head_result.stdout.strip() or "git rev-parse HEAD failed"
+        if strict:
+            raise RuntimeError(f"{label} {msg}")
+        print(f"skip {label}: failed to read local HEAD ({msg})")
+        return False
+
+    remote_head_result = run_repo_command(job, "git rev-parse " + shlex.quote(git_remote_ref))
+    if remote_head_result.returncode != 0:
+        msg = remote_head_result.stderr.strip() or remote_head_result.stdout.strip() or "git rev-parse remote ref failed"
+        if strict:
+            raise RuntimeError(f"{label} {msg}")
+        print(f"skip {label}: failed to read remote ref {git_remote_ref} ({msg})")
+        return False
+
+    local_head = local_head_result.stdout.strip()
+    remote_head = remote_head_result.stdout.strip()
+    if local_head == remote_head:
+        print(f"skip {label}: up to date")
+        return False
+
+    pull_result = run_repo_command(job, git_pull)
+    if pull_result.returncode != 0:
+        msg = pull_result.stderr.strip() or pull_result.stdout.strip() or "git pull failed"
+        if strict:
+            raise RuntimeError(f"{label} {msg}")
+        print(f"skip {label}: git pull failed ({msg})")
+        return False
+
+    return True
 
 
 def get_pending_groups() -> set[str]:
@@ -225,7 +260,7 @@ def queue_job(job: Dict[str, Any], group_prefix: str, dry_run: bool) -> None:
     ensure_pueue_group(group, dry_run=dry_run)
     set_group_parallelism(group, dry_run=dry_run)
 
-    script = generate_job_script(job)
+    script = generate_build_script(job)
     cmd = ["pueue", "add", "-g", group, "bash", "-lc", script]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
@@ -273,7 +308,8 @@ def run_loop(
             if group in pending_groups:
                 print(f"skip [{job['name']}]: group {group} still has queued/running task")
             else:
-                queue_job(job, group_prefix=group_prefix, dry_run=dry_run)
+                if prepare_repo_for_build(job, dry_run=dry_run):
+                    queue_job(job, group_prefix=group_prefix, dry_run=dry_run)
 
             next_runs[job["slug"]] = loop_now + int(job["interval"])
 

@@ -10,11 +10,20 @@ See ```rsb.sh``` for a rust/cargo build example.
 ## Python buildbot (`pueue`)
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
-`pueue` group per project. Each queued task does:
+`pueue` group per project.
+
+Before queueing a build, the scheduler process (not `pueue`) does:
 
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
-3. if changed: run configured `git-pull` (default `git pull --ff-only`), optional `cleanup`, optional `pre-build`, `build`, optional `post-build`
+3. if changed: run configured `git-pull` (default `git pull --ff-only`)
+
+Only the build phase is queued in `pueue`:
+
+1. optional `cleanup`
+2. optional `pre-build`
+3. `build`
+4. optional `post-build`
 
 Useful per-job git options:
 
