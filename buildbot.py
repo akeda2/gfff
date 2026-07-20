@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -156,12 +157,17 @@ def generate_build_script(job: Dict[str, Any]) -> str:
 
 
 def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("BASH_ENV", None)
+    env.pop("ENV", None)
+
     return subprocess.run(
-        ["bash", "-lc", cmd],
+        ["bash", "--noprofile", "--norc", "-lc", cmd],
         cwd=job["path"],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -280,7 +286,22 @@ def get_pending_groups(status_data: Dict[str, Any]) -> set[str]:
 
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
-    cmd = ["pueue", "add", "-g", group, "bash", "-lc", script]
+    cmd = [
+        "pueue",
+        "add",
+        "-g",
+        group,
+        "env",
+        "-u",
+        "BASH_ENV",
+        "-u",
+        "ENV",
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-lc",
+        script,
+    ]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return None
