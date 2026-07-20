@@ -18,5 +18,7 @@
 - name: yt-dlp
   active: true
   path: ~/dev/yt-dlp
+  git-remote-ref: origin/master
+  git-pull: git pull origin master --ff-only
   build: make
   interval: 3600

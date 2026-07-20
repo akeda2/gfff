@@ -13,8 +13,26 @@ See ```rsb.sh``` for a rust/cargo build example.
 `pueue` group per project. Each queued task does:
 
 1. `git fetch`
-2. compare local head with upstream (`@{u}`)
-3. if changed: `git pull --ff-only`, optional `cleanup`, optional `pre-build`, `build`, optional `post-build`
+2. compare local head with configured `git-remote-ref` (default `@{u}`)
+3. if changed: run configured `git-pull` (default `git pull --ff-only`), optional `cleanup`, optional `pre-build`, `build`, optional `post-build`
+
+Useful per-job git options:
+
+- `git-pull`: custom pull command per job, for example `git pull origin main --ff-only`
+- `git-remote-ref`: revision used for update detection, for example `origin/main`
+- `git-strict`: when `false`, fetch/pull failures skip that run instead of failing the task
+
+Example:
+
+```yaml
+- name: my-repo
+	active: true
+	path: ~/dev/my-repo
+	git-remote-ref: origin/release
+	git-pull: git pull origin release --ff-only
+	build: make
+	interval: 3600
+```
 
 ### Requirements
 

@@ -79,6 +79,15 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             raise ValueError(f"Job '{name}' must have interval > 0")
 
         git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
+        git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
+        git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
+
+        if not git_pull:
+            raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
+        if not git_remote_ref:
+            raise ValueError(
+                f"Job '{name}' has invalid 'git-remote-ref': {git_remote_ref}"
+            )
 
         normalized.append(
             {
@@ -91,6 +100,8 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "pre_build": str(job.get("pre-build", "")).strip(),
                 "post_build": str(job.get("post-build", "")).strip(),
                 "git_strict": git_strict,
+                "git_pull": git_pull,
+                "git_remote_ref": git_remote_ref,
             }
         )
 
@@ -127,6 +138,8 @@ def set_group_parallelism(group: str, dry_run: bool) -> None:
 def generate_job_script(job: Dict[str, Any]) -> str:
     label = "[" + job["name"] + "]"
     strict = bool(job.get("git_strict", True))
+    git_pull = str(job.get("git_pull", "git pull --ff-only"))
+    git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
 
     lines = [
         "set -e",
@@ -141,22 +154,27 @@ def generate_job_script(job: Dict[str, Any]) -> str:
             )
         ),
         (
-            "git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1 "
+            "git rev-parse --abbrev-ref --symbolic-full-name "
+            + shlex.quote(git_remote_ref)
+            + " >/dev/null 2>&1 "
             "|| { echo "
-            + shlex.quote(label + " no upstream branch; skipping build")
+            + shlex.quote(
+                label + " cannot resolve git-remote-ref " + git_remote_ref + "; skipping build"
+            )
             + "; exit 0; }"
         ),
         "local_head=$(git rev-parse HEAD)",
-        "remote_head=$(git rev-parse @{u})",
+        "remote_head=$(git rev-parse " + shlex.quote(git_remote_ref) + ")",
         'if [ "$local_head" = "$remote_head" ]; then',
         f"  echo {shlex.quote(label + ' up to date; skipping build')}",
         "  exit 0",
         "fi",
         (
-            "git pull --ff-only"
+            git_pull
             if strict
             else (
-                "git pull --ff-only || { echo "
+                git_pull
+                + " || { echo "
                 + shlex.quote(label + " git pull failed; skipping build")
                 + "; exit 0; }"
             )
