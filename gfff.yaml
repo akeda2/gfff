@@ -1,7 +1,7 @@
 - name: fresh
   active: true
   path: ~/dev/fresh
-  build: cargo build --release
+  build: ~/.cargo/bin/cargo build --release
   interval: 600
 - name: pueue
   active: false
