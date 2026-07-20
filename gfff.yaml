@@ -9,13 +9,13 @@
   git-remote-ref: akeda/inst
   build: ./inst.sh
   interval: 1200
-- name: ComfyUI
-  active: false
-  path: ~/dev/ComfyUI
-  pre-build: . venv/bin/activate
-  build: pip3 install -r requirements.txt
-  post-build: deactivate
-  interval: 3600
+- #name: ComfyUI
+  #active: false
+  #path: ~/dev/ComfyUI
+  #pre-build: . venv/bin/activate
+  #build: pip3 install -r requirements.txt
+  #post-build: deactivate
+  #interval: 3600
 - name: yt-dlp
   active: true
   path: ~/dev/yt-dlp
