@@ -10,7 +10,7 @@ See ```rsb.sh``` for a rust/cargo build example.
 ## Python buildbot (`pueue`)
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
-`pueue` group per project.
+shared `pueue` group for all projects.
 
 Before queueing a build, the scheduler process (not `pueue`) does:
 

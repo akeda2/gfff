@@ -255,11 +255,7 @@ def get_pending_groups() -> set[str]:
     return pending_groups
 
 
-def queue_job(job: Dict[str, Any], group_prefix: str, dry_run: bool) -> None:
-    group = f"{group_prefix}-{job['slug']}"
-    ensure_pueue_group(group, dry_run=dry_run)
-    set_group_parallelism(group, dry_run=dry_run)
-
+def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> None:
     script = generate_build_script(job)
     cmd = ["pueue", "add", "-g", group, "bash", "-lc", script]
     if dry_run:
@@ -291,6 +287,10 @@ def run_loop(
         print("No active jobs found.")
         return 0
 
+    shared_group = group_prefix
+    ensure_pueue_group(shared_group, dry_run=dry_run)
+    set_group_parallelism(shared_group, dry_run=dry_run)
+
     now = time.time()
     next_runs = {job["slug"]: now for job in jobs}
 
@@ -304,12 +304,18 @@ def run_loop(
             if loop_now < next_runs[job["slug"]]:
                 continue
 
-            group = f"{group_prefix}-{job['slug']}"
-            if group in pending_groups:
-                print(f"skip [{job['name']}]: group {group} still has queued/running task")
-            else:
-                if prepare_repo_for_build(job, dry_run=dry_run):
-                    queue_job(job, group_prefix=group_prefix, dry_run=dry_run)
+            if shared_group in pending_groups:
+                print(
+                    f"skip [{job['name']}]: group {shared_group} still has queued/running task"
+                )
+                continue
+
+            if prepare_repo_for_build(job, dry_run=dry_run):
+                queue_job(job, group=shared_group, dry_run=dry_run)
+                pending_groups.add(shared_group)
+                next_runs[job["slug"]] = loop_now + int(job["interval"])
+                # Keep at most one queued build added per scheduler pass.
+                break
 
             next_runs[job["slug"]] = loop_now + int(job["interval"])
 
@@ -331,7 +337,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "--group-prefix",
         default="gfff",
-        help="Prefix for pueue groups (default: gfff)",
+        help="Shared pueue group name for all builds (default: gfff)",
     )
     parser.add_argument(
         "--tick",
