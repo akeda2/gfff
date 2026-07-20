@@ -16,3 +16,10 @@
   git-pull: git pull origin master --ff-only
   build: make
   interval: 3600
+- name: btop
+  active: true
+  path: ~/dev/btop
+  git-remote-ref: origin/master
+  git-pull: git pull origin master --ff-only
+  build: gmake
+  interval: 3600
