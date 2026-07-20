@@ -2,7 +2,7 @@
   active: true
   path: ~/dev/fresh
   build: cargo build --release
-  interval: 3600
+  interval: 600
 - name: pueue
   active: false
   path: ~/dev/pueue
