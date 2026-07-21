@@ -242,6 +242,35 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         )
         return False
 
+    # Only pull/build when the configured remote ref is strictly ahead of local HEAD.
+    # This avoids false positives when local is ahead or the branches have diverged.
+    remote_ahead_check = run_repo_command(
+        job,
+        "git merge-base --is-ancestor "
+        + shlex.quote(local_head)
+        + " "
+        + shlex.quote(git_remote_ref),
+    )
+    if remote_ahead_check.returncode != 0:
+        local_ahead_check = run_repo_command(
+            job,
+            "git merge-base --is-ancestor "
+            + shlex.quote(git_remote_ref)
+            + " "
+            + shlex.quote(local_head),
+        )
+        if local_ahead_check.returncode == 0:
+            log_event(
+                "INFO",
+                f"skip {label}: local HEAD is ahead of {git_remote_ref}; no pull-triggered build",
+            )
+        else:
+            log_event(
+                "ERROR",
+                f"skip {label}: local HEAD and {git_remote_ref} have diverged",
+            )
+        return False
+
     pull_result = run_repo_command(job, git_pull)
     if pull_result.returncode != 0:
         msg = pull_result.stderr.strip() or pull_result.stdout.strip() or "git pull failed"
@@ -250,7 +279,30 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
         log_event("ERROR", f"skip {label}: git pull failed ({msg})")
         return False
 
-    log_event("INFO", f"{label} updates found and pulled successfully")
+    local_head_after_result = run_repo_command(job, "git rev-parse HEAD")
+    if local_head_after_result.returncode != 0:
+        msg = (
+            local_head_after_result.stderr.strip()
+            or local_head_after_result.stdout.strip()
+            or "git rev-parse HEAD after pull failed"
+        )
+        if strict:
+            raise RuntimeError(f"{label} {msg}")
+        log_event("ERROR", f"skip {label}: failed to read local HEAD after pull ({msg})")
+        return False
+
+    local_head_after = local_head_after_result.stdout.strip()
+    if local_head_after == local_head:
+        log_event(
+            "INFO",
+            f"skip {label}: git pull completed but HEAD did not advance",
+        )
+        return False
+
+    log_event(
+        "INFO",
+        f"{label} updates found and pulled successfully ({local_head[:12]} -> {local_head_after[:12]})",
+    )
     return True
 
 
@@ -425,18 +477,23 @@ def run_loop(
             if loop_now < next_runs[job["slug"]]:
                 continue
 
-            if prepare_repo_for_build(job, dry_run=dry_run):
-                task_id = queue_job(job, group=shared_group, dry_run=dry_run)
-                if task_id is not None:
-                    tracked_tasks[task_id] = {
-                        "job_name": str(job["name"]),
-                        "manual_install_cmd": str(job.get("manual_install_cmd", "")),
-                    }
-                next_runs[job["slug"]] = loop_now + int(job["interval"])
-                # Keep at most one queued build added per scheduler pass.
-                break
+            try:
+                if prepare_repo_for_build(job, dry_run=dry_run):
+                    task_id = queue_job(job, group=shared_group, dry_run=dry_run)
+                    if task_id is not None:
+                        tracked_tasks[task_id] = {
+                            "job_name": str(job["name"]),
+                            "manual_install_cmd": str(job.get("manual_install_cmd", "")),
+                        }
+                    next_runs[job["slug"]] = loop_now + int(job["interval"])
+                    # Keep at most one queued build added per scheduler pass.
+                    break
 
-            next_runs[job["slug"]] = loop_now + int(job["interval"])
+                next_runs[job["slug"]] = loop_now + int(job["interval"])
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                label = "[" + str(job.get("name", job.get("slug", "job"))) + "]"
+                log_event("ERROR", f"skip {label}: scheduler recovered from job error ({exc})")
+                next_runs[job["slug"]] = loop_now + int(job["interval"])
 
         if run_once:
             return 0
