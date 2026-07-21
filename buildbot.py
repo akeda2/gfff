@@ -273,19 +273,37 @@ def extract_task_state(task: Dict[str, Any]) -> str:
     return "Unknown"
 
 
+def normalize_task_result(result: Any) -> Optional[str]:
+    if result is None:
+        return None
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        if "Success" in result:
+            return "Success"
+        if "Failed" in result:
+            return f"Failed({result['Failed']})"
+        if len(result) == 1:
+            key, value = next(iter(result.items()))
+            if value in (None, ""):
+                return str(key)
+            return f"{key}({value})"
+        return json.dumps(result, sort_keys=True)
+    if isinstance(result, (list, tuple)):
+        return json.dumps(result)
+    return str(result)
+
+
 def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
     status = task.get("status")
     if isinstance(status, dict) and status:
         state, state_data = next(iter(status.items()))
         if state == "Done" and isinstance(state_data, dict):
-            result = state_data.get("result")
-            if isinstance(result, str):
+            result = normalize_task_result(state_data.get("result"))
+            if result is not None:
                 return result
 
-    result = task.get("result")
-    if isinstance(result, str):
-        return result
-    return None
+    return normalize_task_result(task.get("result"))
 
 
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
@@ -349,7 +367,7 @@ def log_finished_task_outcomes(
 
         job_name = task_meta["job_name"]
         done_result = extract_done_result(task)
-        if state == "Done" and (done_result is None or done_result == "Success"):
+        if state == "Done" and done_result == "Success":
             log_event("INFO", f"outcome [{job_name}]: task {task_id} completed successfully")
             manual_install_cmd = task_meta.get("manual_install_cmd", "").strip()
             if manual_install_cmd:
