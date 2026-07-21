@@ -30,3 +30,8 @@
   git-pull: git pull origin rework --ff-only
   build: pytest -q --tb=short
   interval: 3600
+- name: gfff
+  active: true
+  path: ~/dev/gfff
+  build: ./install-buildbot.sh
+  interval: 120
