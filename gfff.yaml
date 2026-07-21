@@ -1,0 +1,32 @@
+- name: fresh
+  active: true
+  path: ~/dev/fresh
+  build: ~/.cargo/bin/cargo build --release
+  interval: 600
+- name: pueue
+  active: false
+  path: ~/dev/pueue
+  git-remote-ref: akeda/inst
+  build: ./inst.sh
+  interval: 1200
+- name: yt-dlp
+  active: true
+  path: ~/dev/yt-dlp
+  git-remote-ref: origin/master
+  git-pull: git pull origin master --ff-only
+  build: make
+  manual-install-cmd: sudo make install
+  interval: 3600
+- name: btop
+  active: true
+  path: ~/dev/btop
+  build: gmake
+  manual-install-cmd: sudo gmake install
+  interval: 3600
+- name: eb
+  active: true
+  path: ~/dev/eb
+  git-remote-ref: origin/rework
+  git-pull: git pull origin rework --ff-only
+  build: pytest -q --tb=short
+  interval: 3600

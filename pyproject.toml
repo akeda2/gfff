@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gfff-buildbot"
+version = "0.1.0"
+description = "Schedule git-aware build jobs from gfff.yaml through pueue"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+gfff-buildbot = "buildbot:main"
+
+[tool.setuptools]
+py-modules = ["buildbot"]

@@ -4,7 +4,7 @@
 
 set -e
 
-git fetch
+git fetch --quiet
 
 local=$(git rev-parse HEAD)
 remote=$(git rev-parse @{u})
