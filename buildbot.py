@@ -425,18 +425,23 @@ def run_loop(
             if loop_now < next_runs[job["slug"]]:
                 continue
 
-            if prepare_repo_for_build(job, dry_run=dry_run):
-                task_id = queue_job(job, group=shared_group, dry_run=dry_run)
-                if task_id is not None:
-                    tracked_tasks[task_id] = {
-                        "job_name": str(job["name"]),
-                        "manual_install_cmd": str(job.get("manual_install_cmd", "")),
-                    }
-                next_runs[job["slug"]] = loop_now + int(job["interval"])
-                # Keep at most one queued build added per scheduler pass.
-                break
+            try:
+                if prepare_repo_for_build(job, dry_run=dry_run):
+                    task_id = queue_job(job, group=shared_group, dry_run=dry_run)
+                    if task_id is not None:
+                        tracked_tasks[task_id] = {
+                            "job_name": str(job["name"]),
+                            "manual_install_cmd": str(job.get("manual_install_cmd", "")),
+                        }
+                    next_runs[job["slug"]] = loop_now + int(job["interval"])
+                    # Keep at most one queued build added per scheduler pass.
+                    break
 
-            next_runs[job["slug"]] = loop_now + int(job["interval"])
+                next_runs[job["slug"]] = loop_now + int(job["interval"])
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                label = "[" + str(job.get("name", job.get("slug", "job"))) + "]"
+                log_event("ERROR", f"skip {label}: scheduler recovered from job error ({exc})")
+                next_runs[job["slug"]] = loop_now + int(job["interval"])
 
         if run_once:
             return 0
