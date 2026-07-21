@@ -37,7 +37,7 @@ Logging now includes:
 - when no git updates are found for a job
 - git/pull related errors
 - when a job is added to `pueue` (including task id when available)
-- queued task outcome (`Done` vs non-success states)
+- queued task outcome (`Done` with `result: Success` vs non-success `Done` results/states)
 - required manual action line with the exact `manual-install-cmd`
 
 Example:

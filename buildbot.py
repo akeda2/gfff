@@ -273,6 +273,21 @@ def extract_task_state(task: Dict[str, Any]) -> str:
     return "Unknown"
 
 
+def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
+    status = task.get("status")
+    if isinstance(status, dict) and status:
+        state, state_data = next(iter(status.items()))
+        if state == "Done" and isinstance(state_data, dict):
+            result = state_data.get("result")
+            if isinstance(result, str):
+                return result
+
+    result = task.get("result")
+    if isinstance(result, str):
+        return result
+    return None
+
+
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
     cmd = [
@@ -333,7 +348,8 @@ def log_finished_task_outcomes(
             continue
 
         job_name = task_meta["job_name"]
-        if state == "Done":
+        done_result = extract_done_result(task)
+        if state == "Done" and (done_result is None or done_result == "Success"):
             log_event("INFO", f"outcome [{job_name}]: task {task_id} completed successfully")
             manual_install_cmd = task_meta.get("manual_install_cmd", "").strip()
             if manual_install_cmd:
@@ -341,6 +357,11 @@ def log_finished_task_outcomes(
                     "ACTION",
                     f"manual step required for [{job_name}]: run '{manual_install_cmd}'",
                 )
+        elif state == "Done":
+            log_event(
+                "ERROR",
+                f"outcome [{job_name}]: task {task_id} completed with non-success result {done_result!r}. Check 'pueue log {task_id}'",
+            )
         else:
             log_event(
                 "ERROR",
