@@ -34,4 +34,4 @@
   active: true
   path: ~/dev/gfff
   build: ./install-buildbot.sh
-  interval: 3700
+  interval: 3600
