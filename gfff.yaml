@@ -42,4 +42,4 @@
   active: true
   test: python3 ./inst.sh buildbot-check
   build: python3 ./inst.sh buildbot --preserve-service-state
-  interval: 3600
+  at: 03:00

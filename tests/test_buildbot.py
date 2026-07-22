@@ -1,4 +1,5 @@
 import io
+import datetime as dt
 import subprocess
 import tempfile
 import unittest
@@ -15,9 +16,13 @@ from buildbot import (
     log_finished_task_outcomes,
     normalize_jobs,
     normalize_task_result,
+    next_daily_at_timestamp,
     parse_bool,
+    parse_at_time,
+    parse_args,
     prepare_repo_for_build,
     queue_job,
+    run_loop,
     sanitize_name,
 )
 
@@ -89,6 +94,51 @@ class NormalizeJobsTests(unittest.TestCase):
                     }
                 ]
             )
+
+    def test_allows_at_without_interval(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "daily",
+                    "active": True,
+                    "path": "~/repo",
+                    "test": "pytest -q",
+                    "at": "05:00",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["at"], "05:00")
+        self.assertIsNone(jobs[0]["interval"])
+
+    def test_rejects_both_interval_and_at(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "invalid",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "at": "05:00",
+                    }
+                ]
+            )
+        self.assertIn("only one of 'interval' or 'at'", str(ctx.exception))
+
+    def test_rejects_missing_interval_and_at(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "invalid",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                    }
+                ]
+            )
+        self.assertIn("must set one of 'interval' or 'at'", str(ctx.exception))
 
     def test_skips_inactive_jobs(self) -> None:
         jobs = normalize_jobs(
@@ -168,6 +218,24 @@ class PrimitiveFunctionTests(unittest.TestCase):
     def test_sanitize_name(self) -> None:
         self.assertEqual(sanitize_name("  hello world  "), "hello-world")
         self.assertEqual(sanitize_name("***"), "job")
+
+    def test_parse_at_time(self) -> None:
+        self.assertEqual(parse_at_time("05:00", "job"), "05:00")
+        with self.assertRaises(ValueError):
+            parse_at_time("5:00", "job")
+        with self.assertRaises(ValueError):
+            parse_at_time("24:00", "job")
+
+    def test_next_daily_at_timestamp(self) -> None:
+        now = dt.datetime(2026, 1, 2, 4, 30, 0).timestamp()
+        next_ts = next_daily_at_timestamp("05:00", now)
+        expected = dt.datetime(2026, 1, 2, 5, 0, 0).timestamp()
+        self.assertEqual(next_ts, expected)
+
+        now_after = dt.datetime(2026, 1, 2, 5, 0, 1).timestamp()
+        next_after_ts = next_daily_at_timestamp("05:00", now_after)
+        expected_next_day = dt.datetime(2026, 1, 3, 5, 0, 0).timestamp()
+        self.assertEqual(next_after_ts, expected_next_day)
 
 
 class LoadYamlConfigTests(unittest.TestCase):
@@ -350,6 +418,98 @@ class PrepareRepoForBuildTests(unittest.TestCase):
                     ok = prepare_repo_for_build(job, dry_run=False)
             self.assertFalse(ok)
             self.assertTrue(log_mock.called)
+
+    def test_force_run_skips_git_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {"name": "repo", "path": tmp}
+            with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+                ok = prepare_repo_for_build(job, dry_run=False, force_run=True)
+            self.assertTrue(ok)
+            run_repo_mock.assert_not_called()
+
+
+class ParseArgsTests(unittest.TestCase):
+    def test_accepts_force_flag(self) -> None:
+        args = parse_args(["--once", "--force"])
+        self.assertTrue(args.once)
+        self.assertTrue(args.force)
+
+
+class RunLoopTests(unittest.TestCase):
+    def test_once_force_queues_at_job_immediately(self) -> None:
+        jobs = [
+            {
+                "name": "daily",
+                "slug": "daily",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "23:59",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True) as prep_mock:
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                )
+
+        self.assertEqual(rc, 0)
+        prep_mock.assert_called_once()
+        queue_mock.assert_called_once()
+
+    def test_once_force_queues_all_eligible_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "a",
+                "slug": "a",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "manual_install_cmd": "",
+            },
+            {
+                "name": "b",
+                "slug": "b",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "23:59",
+                "manual_install_cmd": "",
+            },
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(queue_mock.call_count, 2)
 
 
 if __name__ == "__main__":
