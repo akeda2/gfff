@@ -2,12 +2,12 @@
 
 Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 
-## Python buildbot (`pueue`)
+## Python buildbot (`using pueue`)
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
 
-Before queueing a build, the scheduler process (not `pueue`) does:
+Before queueing a build, the internal scheduler process does:
 
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
