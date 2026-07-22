@@ -40,5 +40,6 @@
 - name: brec
   path: ~/dev/brec
   active: true
-  test: python3 ./brec.py doctor --skip-device-check
-  interval: 3600
+  test: ./inst.sh buildbot-check
+  build: ./inst.sh buildbot --preserve-service-state
+  at: 03:00

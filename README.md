@@ -7,6 +7,25 @@ Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
 
+On startup, `gfff-buildbot` sets the `gfff` pueue group parallelism to the
+detected CPU thread count.
+
+You can still adjust concurrency with pueue commands (globally or for the
+selected group) based on your machine capacity.
+
+Example pueue concurrency commands:
+
+```bash
+# Show current parallelism (global and groups)
+pueue parallel
+
+# Set parallelism for the shared gfff group
+pueue parallel -g gfff 4
+
+# Set global default parallelism
+pueue parallel 8
+```
+
 Before queueing a build, the internal scheduler process does:
 
 1. `git fetch`
@@ -23,6 +42,11 @@ Only the build phase is queued in `pueue`:
 
 `test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
 If a repo is test-only, omit `build` and set only `test`.
+
+Scheduling supports two modes per active job:
+
+- `interval`: run every N seconds
+- `at`: run once daily at a fixed time in local time, for example `05:00`
 
 Useful per-job git options:
 
@@ -53,7 +77,18 @@ Example:
 	interval: 3600
 ```
 
+Daily schedule example:
+
+```yaml
+- name: morning-test
+	active: true
+	path: ~/dev/my-repo
+	test: pytest -q
+	at: 05:00
+```
+
 At least one of `test` or `build` must be set for an active job.
+Exactly one of `interval` or `at` must be set for an active job.
 
 ### Requirements
 
@@ -73,8 +108,9 @@ This script will:
 
 1. create/update a dedicated venv at `~/.local/share/gfff-buildbot/.venv`
 2. install/upgrade the `gfff-buildbot` package (including `PyYAML`) into that venv
-3. install/update `~/.config/systemd/user/gfff-buildbot.service`
-4. reload user systemd and enable/start (or restart) the service
+3. create/update `~/.local/bin/gfff-buildbot` as a symlink to the venv command
+4. install/update `~/.config/systemd/user/gfff-buildbot.service`
+5. reload user systemd and enable/start (or restart) the service
 
 This avoids `--break-system-packages` on modern Ubuntu and other PEP 668 environments.
 
@@ -98,7 +134,13 @@ python3 -m venv ~/.local/share/gfff-buildbot/.venv
 
 ### Run
 
-Use the venv-installed command:
+Use the PATH command (installed by `install-buildbot.sh`):
+
+```bash
+gfff-buildbot
+```
+
+Direct venv path also works:
 
 ```bash
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot
@@ -110,9 +152,15 @@ Useful flags:
 # Queue all active jobs once, then exit
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --once
 
+# Queue all active jobs once even if git has no updates
+~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --once --force
+
 # Preview pueue commands without running them
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --dry-run
 ```
+
+`--force` bypasses git update checks and queues the run immediately.
+This is intended for interactive/manual triggering.
 
 ### Tests
 

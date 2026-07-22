@@ -4,6 +4,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${HOME}/.local/share/gfff-buildbot/.venv"
+USER_BIN_DIR="${HOME}/.local/bin"
+BOT_CMD_SRC="${VENV_DIR}/bin/gfff-buildbot"
+BOT_CMD_LINK="${USER_BIN_DIR}/gfff-buildbot"
 SERVICE_SRC="${SCRIPT_DIR}/gfff-buildbot.service"
 SERVICE_DST_DIR="${HOME}/.config/systemd/user"
 SERVICE_DST="${SERVICE_DST_DIR}/gfff-buildbot.service"
@@ -19,6 +22,18 @@ python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip setuptools wheel
 "${VENV_DIR}/bin/python" -m pip install --upgrade .
 echo "gfff-buildbot venv package install SUCCESS!"
+
+mkdir -p "${USER_BIN_DIR}"
+ln -sfn "${BOT_CMD_SRC}" "${BOT_CMD_LINK}"
+echo "gfff-buildbot command link install/update SUCCESS! (${BOT_CMD_LINK} -> ${BOT_CMD_SRC})"
+
+case ":${PATH}:" in
+    *":${USER_BIN_DIR}:"*) ;;
+    *)
+        echo "WARNING: ${USER_BIN_DIR} is not in PATH for this shell."
+        echo "         Add it to your shell profile to run 'gfff-buildbot' directly."
+        ;;
+esac
 
 mkdir -p "${SERVICE_DST_DIR}"
 install -m 644 "${SERVICE_SRC}" "${SERVICE_DST}"

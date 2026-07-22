@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -60,6 +61,24 @@ def parse_bool(value: Any, field: str, job_name: str) -> bool:
     raise ValueError(f"Job '{job_name}' has invalid '{field}': {value}")
 
 
+def parse_at_time(value: Any, job_name: str) -> str:
+    at = str(value).strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
+        raise ValueError(
+            f"Job '{job_name}' has invalid 'at': {value}. Expected HH:MM (24-hour)."
+        )
+    return at
+
+
+def next_daily_at_timestamp(at_time: str, from_ts: float) -> float:
+    hour, minute = map(int, at_time.split(":"))
+    now = dt.datetime.fromtimestamp(from_ts)
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate.timestamp() <= from_ts:
+        candidate += dt.timedelta(days=1)
+    return candidate.timestamp()
+
+
 def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for idx, job in enumerate(jobs, start=1):
@@ -70,20 +89,34 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         path = str(job.get("path", "")).strip()
         build = str(job.get("build", "")).strip()
         test = str(job.get("test", "")).strip()
-        interval = job.get("interval", 0)
+        interval = job.get("interval")
+        at = str(job.get("at", "")).strip()
 
         if not path:
             raise ValueError(f"Job '{name}' is missing 'path'")
         if not build and not test:
             raise ValueError(f"Job '{name}' must define at least one of 'build' or 'test'")
 
-        try:
-            interval_s = int(interval)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Job '{name}' has invalid 'interval': {interval}") from exc
+        has_interval = interval not in (None, "")
+        has_at = bool(at)
+        if has_interval and has_at:
+            raise ValueError(f"Job '{name}' must set only one of 'interval' or 'at'")
+        if not has_interval and not has_at:
+            raise ValueError(f"Job '{name}' must set one of 'interval' or 'at'")
 
-        if interval_s <= 0:
-            raise ValueError(f"Job '{name}' must have interval > 0")
+        interval_s: Optional[int] = None
+        at_s: str = ""
+
+        if has_interval:
+            try:
+                interval_s = int(interval)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Job '{name}' has invalid 'interval': {interval}") from exc
+
+            if interval_s <= 0:
+                raise ValueError(f"Job '{name}' must have interval > 0")
+        else:
+            at_s = parse_at_time(at, name)
 
         git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
@@ -104,6 +137,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "build": build,
                 "test": test,
                 "interval": interval_s,
+                "at": at_s,
                 "cleanup": str(job.get("cleanup", "")).strip(),
                 "pre_build": str(job.get("pre-build", "")).strip(),
                 "post_build": str(job.get("post-build", "")).strip(),
@@ -133,8 +167,8 @@ def ensure_pueue_group(group: str, dry_run: bool) -> None:
     raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
-def set_group_parallelism(group: str, dry_run: bool) -> None:
-    cmd = ["pueue", "parallel", "-g", group, "1"]
+def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
+    cmd = ["pueue", "parallel", "-g", group, str(parallelism)]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -176,7 +210,7 @@ def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProce
     )
 
 
-def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
+def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool = False) -> bool:
     label = "[" + job["name"] + "]"
     strict = bool(job.get("git_strict", True))
     git_pull = str(job.get("git_pull", "git pull --ff-only"))
@@ -186,6 +220,10 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool) -> bool:
     if not repo_path.is_dir():
         log_event("ERROR", f"skip {label}: path does not exist: {repo_path}")
         return False
+
+    if force_run:
+        log_event("INFO", f"force {label}: skipping git update checks")
+        return True
 
     if dry_run:
         print(f"DRY RUN: ({job['path']}) git fetch")
@@ -459,17 +497,27 @@ def run_loop(
     tick: int,
     dry_run: bool,
     run_once: bool,
+    force_run: bool,
 ) -> int:
     if not jobs:
         print("No active jobs found.")
         return 0
 
     shared_group = group_prefix
+    cpu_threads = max(1, os.cpu_count() or 1)
     ensure_pueue_group(shared_group, dry_run=dry_run)
-    set_group_parallelism(shared_group, dry_run=dry_run)
+    set_group_parallelism(shared_group, parallelism=cpu_threads, dry_run=dry_run)
+    log_event("INFO", f"configured pueue group '{shared_group}' parallelism to {cpu_threads}")
 
     now = time.time()
-    next_runs = {job["slug"]: now for job in jobs}
+    next_runs: Dict[str, float] = {}
+    for job in jobs:
+        if run_once and force_run:
+            next_runs[job["slug"]] = now
+        elif job.get("at"):
+            next_runs[job["slug"]] = next_daily_at_timestamp(str(job["at"]), now)
+        else:
+            next_runs[job["slug"]] = now
     tracked_tasks: Dict[int, Dict[str, str]] = {}
 
     while True:
@@ -483,22 +531,38 @@ def run_loop(
                 continue
 
             try:
-                if prepare_repo_for_build(job, dry_run=dry_run):
+                if prepare_repo_for_build(job, dry_run=dry_run, force_run=force_run):
                     task_id = queue_job(job, group=shared_group, dry_run=dry_run)
                     if task_id is not None:
                         tracked_tasks[task_id] = {
                             "job_name": str(job["name"]),
                             "manual_install_cmd": str(job.get("manual_install_cmd", "")),
                         }
-                    next_runs[job["slug"]] = loop_now + int(job["interval"])
-                    # Keep at most one queued build added per scheduler pass.
-                    break
+                    if job.get("at"):
+                        next_runs[job["slug"]] = next_daily_at_timestamp(
+                            str(job["at"]), loop_now + 1
+                        )
+                    else:
+                        next_runs[job["slug"]] = loop_now + int(job["interval"])
+                    # In continuous mode we queue at most one build per pass.
+                    if not run_once:
+                        break
 
-                next_runs[job["slug"]] = loop_now + int(job["interval"])
+                if job.get("at"):
+                    next_runs[job["slug"]] = next_daily_at_timestamp(
+                        str(job["at"]), loop_now + 1
+                    )
+                else:
+                    next_runs[job["slug"]] = loop_now + int(job["interval"])
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 label = "[" + str(job.get("name", job.get("slug", "job"))) + "]"
                 log_event("ERROR", f"skip {label}: scheduler recovered from job error ({exc})")
-                next_runs[job["slug"]] = loop_now + int(job["interval"])
+                if job.get("at"):
+                    next_runs[job["slug"]] = next_daily_at_timestamp(
+                        str(job["at"]), loop_now + 1
+                    )
+                else:
+                    next_runs[job["slug"]] = loop_now + int(job["interval"])
 
         if run_once:
             return 0
@@ -536,6 +600,11 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="Print pueue commands without executing them",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Queue runs even when git has no updates (useful with --once)",
+    )
     return parser.parse_args(argv)
 
 
@@ -551,6 +620,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             tick=args.tick,
             dry_run=args.dry_run,
             run_once=args.once,
+            force_run=args.force,
         )
     except KeyboardInterrupt:
         print("Interrupted.")
