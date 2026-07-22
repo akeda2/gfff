@@ -7,6 +7,22 @@ Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
 
+The scheduler does not override pueue parallelism. Configure concurrency with
+pueue itself (globally or for the selected group) based on your machine capacity.
+
+Example pueue concurrency commands:
+
+```bash
+# Show current parallelism (global and groups)
+pueue parallel
+
+# Set parallelism for the shared gfff group
+pueue parallel -g gfff 4
+
+# Set global default parallelism
+pueue parallel 8
+```
+
 Before queueing a build, the internal scheduler process does:
 
 1. `git fetch`

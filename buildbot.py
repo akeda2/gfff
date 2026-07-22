@@ -505,7 +505,6 @@ def run_loop(
 
     shared_group = group_prefix
     ensure_pueue_group(shared_group, dry_run=dry_run)
-    set_group_parallelism(shared_group, dry_run=dry_run)
 
     now = time.time()
     next_runs: Dict[str, float] = {}
