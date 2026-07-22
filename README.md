@@ -1,18 +1,13 @@
 # gfff
-git fetch and forward
 
-Fetches from remote and returns true or false.
-```
-gfff && echo "Updates available!" || echo "No updates"
-```
-See ```rsb.sh``` for a rust/cargo build example.
+Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 
-## Python buildbot (`pueue`)
+## Python buildbot (`using pueue`)
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
 
-Before queueing a build, the scheduler process (not `pueue`) does:
+Before queueing a build, the internal scheduler process does:
 
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
@@ -22,8 +17,12 @@ Only the build phase is queued in `pueue`:
 
 1. optional `cleanup`
 2. optional `pre-build`
-3. `build`
-4. optional `post-build`
+3. optional `test`
+4. optional `build`
+5. optional `post-build`
+
+`test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
+If a repo is test-only, omit `build` and set only `test`.
 
 Useful per-job git options:
 
@@ -48,24 +47,19 @@ Example:
 	path: ~/dev/my-repo
 	git-remote-ref: origin/release
 	git-pull: git pull origin release --ff-only
+	test: pytest -q --tb=short
 	build: make
 	manual-install-cmd: sudo make install
 	interval: 3600
 ```
+
+At least one of `test` or `build` must be set for an active job.
 
 ### Requirements
 
 - `pueue`
 - `git`
 - Python 3
-
-### Install Shell Scripts
-
-Use `inst.sh` when you only want the helper shell scripts used by other workflows:
-
-```bash
-bash inst.sh
-```
 
 ### Install Buildbot (Package + Service)
 
@@ -120,6 +114,20 @@ Useful flags:
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --dry-run
 ```
 
+### Tests
+
+Run the buildbot unit tests:
+
+```bash
+python3 -m unittest discover -s tests -q
+```
+
+In CI or other isolated environments, run with an explicit interpreter path, for example:
+
+```bash
+./.venv/bin/python -m unittest discover -s tests -q
+```
+
 ### Legacy User-Site Install (may fail on modern Ubuntu)
 
 ```bash
@@ -151,3 +159,27 @@ Notes:
 
 - The unit expects this repo at `%h/dev/gfff`.
 - The service runs `%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot`.
+
+## Legacy Shell Scripts
+
+The shell helpers remain available for older workflows.
+
+### gfff Script
+
+Fetches from remote and returns true or false:
+
+```bash
+gfff && echo "Updates available!" || echo "No updates"
+```
+
+### Rust Build Example
+
+See `rsb.sh` for a rust/cargo build example.
+
+### Install Legacy Shell Scripts
+
+Use `inst.sh` when you only want the helper shell scripts used by legacy workflows:
+
+```bash
+bash inst.sh
+```

@@ -28,10 +28,17 @@
   path: ~/dev/eb
   git-remote-ref: origin/rework
   git-pull: git pull origin rework --ff-only
+  test: make test
   build: pytest -q --tb=short
   interval: 3600
 - name: gfff
   active: true
   path: ~/dev/gfff
+  test: python3 -m unittest discover -s tests
   build: ./install-buildbot.sh
+  interval: 3600
+- name: brec
+  path: ~/dev/brec
+  active: true
+  test: python3 ./brec.py doctor --skip-device-check
   interval: 3600
