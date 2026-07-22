@@ -147,6 +147,28 @@ Short alias:
 gb
 ```
 
+### Config Discovery
+
+If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
+
+1. `./gfff.yaml` (current directory)
+2. `~/.config/gfff/gfff.yaml` (local user config)
+3. development fallback config from user service `ExecStart --config` (if available)
+4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
+
+Important behavior:
+
+- If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
+- All found configs are merged in order.
+- If a later config contains a job with the same `name` as an earlier config, the later one is ignored.
+
+This makes `~/.config/gfff/gfff.yaml` the recommended place for user-local defaults.
+
+Optional flags for discovery behavior:
+
+- `--no-dev-fallback`: ignore the development fallback config in auto-discovery.
+- `--dev-fallback-config /path/to/gfff.yaml`: use a custom development fallback config path instead of `~/dev/gfff/gfff.yaml`.
+
 Direct venv path also works:
 
 ```bash
