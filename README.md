@@ -22,8 +22,12 @@ Only the build phase is queued in `pueue`:
 
 1. optional `cleanup`
 2. optional `pre-build`
-3. `build`
-4. optional `post-build`
+3. optional `test`
+4. optional `build`
+5. optional `post-build`
+
+`test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
+If a repo is test-only, omit `build` and set only `test`.
 
 Useful per-job git options:
 
@@ -48,10 +52,13 @@ Example:
 	path: ~/dev/my-repo
 	git-remote-ref: origin/release
 	git-pull: git pull origin release --ff-only
+	test: pytest -q --tb=short
 	build: make
 	manual-install-cmd: sudo make install
 	interval: 3600
 ```
+
+At least one of `test` or `build` must be set for an active job.
 
 ### Requirements
 

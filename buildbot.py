@@ -69,12 +69,13 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         name = str(job.get("name", "")).strip() or f"job-{idx}"
         path = str(job.get("path", "")).strip()
         build = str(job.get("build", "")).strip()
+        test = str(job.get("test", "")).strip()
         interval = job.get("interval", 0)
 
         if not path:
             raise ValueError(f"Job '{name}' is missing 'path'")
-        if not build:
-            raise ValueError(f"Job '{name}' is missing 'build'")
+        if not build and not test:
+            raise ValueError(f"Job '{name}' must define at least one of 'build' or 'test'")
 
         try:
             interval_s = int(interval)
@@ -101,6 +102,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "slug": sanitize_name(name),
                 "path": str(Path(path).expanduser()),
                 "build": build,
+                "test": test,
                 "interval": interval_s,
                 "cleanup": str(job.get("cleanup", "")).strip(),
                 "pre_build": str(job.get("pre-build", "")).strip(),
@@ -149,7 +151,10 @@ def generate_build_script(job: Dict[str, Any]) -> str:
         lines.append(job["cleanup"])
     if job["pre_build"]:
         lines.append(job["pre_build"])
-    lines.append(job["build"])
+    if job.get("test"):
+        lines.append(str(job["test"]))
+    if job.get("build"):
+        lines.append(str(job["build"]))
     if job["post_build"]:
         lines.append(job["post_build"])
 
