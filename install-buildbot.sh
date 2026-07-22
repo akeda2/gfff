@@ -7,6 +7,8 @@ VENV_DIR="${HOME}/.local/share/gfff-buildbot/.venv"
 USER_BIN_DIR="${HOME}/.local/bin"
 BOT_CMD_SRC="${VENV_DIR}/bin/gfff-buildbot"
 BOT_CMD_LINK="${USER_BIN_DIR}/gfff-buildbot"
+BOT_ALIAS_SRC="${VENV_DIR}/bin/gb"
+BOT_ALIAS_LINK="${USER_BIN_DIR}/gb"
 SERVICE_SRC="${SCRIPT_DIR}/gfff-buildbot.service"
 SERVICE_DST_DIR="${HOME}/.config/systemd/user"
 SERVICE_DST="${SERVICE_DST_DIR}/gfff-buildbot.service"
@@ -25,7 +27,9 @@ echo "gfff-buildbot venv package install SUCCESS!"
 
 mkdir -p "${USER_BIN_DIR}"
 ln -sfn "${BOT_CMD_SRC}" "${BOT_CMD_LINK}"
+ln -sfn "${BOT_ALIAS_SRC}" "${BOT_ALIAS_LINK}"
 echo "gfff-buildbot command link install/update SUCCESS! (${BOT_CMD_LINK} -> ${BOT_CMD_SRC})"
+echo "gb command link install/update SUCCESS! (${BOT_ALIAS_LINK} -> ${BOT_ALIAS_SRC})"
 
 case ":${PATH}:" in
     *":${USER_BIN_DIR}:"*) ;;

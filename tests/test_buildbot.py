@@ -9,14 +9,18 @@ from unittest.mock import patch
 
 import buildbot
 from buildbot import (
+    CONFIG_FILENAME,
+    discover_default_config_paths,
     extract_done_result,
     extract_task_state,
     generate_build_script,
     load_yaml_config,
     log_finished_task_outcomes,
+    merge_jobs_from_configs,
     normalize_jobs,
     normalize_task_result,
     next_daily_at_timestamp,
+    parse_config_path_from_service,
     parse_bool,
     parse_at_time,
     parse_args,
@@ -255,6 +259,204 @@ class LoadYamlConfigTests(unittest.TestCase):
             self.assertEqual(data[0]["name"], "x")
 
 
+class ConfigDiscoveryTests(unittest.TestCase):
+    def test_discovery_order_cwd_then_user_then_dev(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            cwd_config = cwd / CONFIG_FILENAME
+            cwd_config.write_text("[]\n", encoding="utf-8")
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            dev_config = home / "dev" / "gfff" / "gfff.yaml"
+            dev_config.parent.mkdir(parents=True, exist_ok=True)
+            dev_config.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths()
+
+            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve(), dev_config.resolve()])
+
+    def test_dev_config_stays_last_when_cwd_is_dev_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            dev_config = home / "dev" / "gfff" / "gfff.yaml"
+            dev_config.parent.mkdir(parents=True, exist_ok=True)
+            dev_config.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=dev_config.parent):
+                    paths = discover_default_config_paths()
+
+            self.assertEqual(paths, [user_config.resolve(), dev_config.resolve()])
+
+    def test_no_dev_fallback_excludes_dev_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            cwd_config = cwd / CONFIG_FILENAME
+            cwd_config.write_text("[]\n", encoding="utf-8")
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            dev_config = home / "dev" / "gfff" / "gfff.yaml"
+            dev_config.parent.mkdir(parents=True, exist_ok=True)
+            dev_config.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+
+            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve()])
+
+    def test_custom_dev_fallback_path_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            custom_dev = Path(tmp) / "alt" / "repo" / "gfff.yaml"
+            custom_dev.parent.mkdir(parents=True, exist_ok=True)
+            custom_dev.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(dev_fallback_config=custom_dev)
+
+            self.assertEqual(paths, [user_config.resolve(), custom_dev.resolve()])
+
+    def test_parse_config_path_from_service_execstart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = Path(tmp) / "gfff-buildbot.service"
+            service.write_text(
+                "[Service]\n"
+                "ExecStart=/usr/bin/gfff-buildbot --config /opt/custom/gfff.yaml --once\n",
+                encoding="utf-8",
+            )
+
+            config_path = parse_config_path_from_service(service)
+
+        self.assertEqual(config_path, Path("/opt/custom/gfff.yaml").resolve())
+
+    def test_parse_config_path_from_service_percent_h(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            service = Path(tmp) / "gfff-buildbot.service"
+            service.write_text(
+                "[Service]\n"
+                "ExecStart=%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --config %h/dev/alt/gfff.yaml\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                config_path = parse_config_path_from_service(service)
+
+        self.assertEqual(config_path, (home / "dev/alt/gfff.yaml").resolve())
+
+    def test_discovery_uses_installed_service_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            service_cfg = home / "repos" / "bot" / "gfff.yaml"
+            service_cfg.parent.mkdir(parents=True, exist_ok=True)
+            service_cfg.write_text("[]\n", encoding="utf-8")
+
+            service_file = home / ".config" / "systemd" / "user" / "gfff-buildbot.service"
+            service_file.parent.mkdir(parents=True, exist_ok=True)
+            service_file.write_text(
+                "[Service]\n"
+                f"ExecStart=/usr/bin/gfff-buildbot --config {service_cfg}\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths()
+
+            self.assertEqual(paths, [user_config.resolve(), service_cfg.resolve()])
+
+    def test_user_config_directory_loads_gfff_then_sorted_yaml_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_dir = home / ".config" / "gfff"
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+            primary = user_dir / "gfff.yaml"
+            first = user_dir / "10firstlist.yaml"
+            second = user_dir / "30secondlist.yaml"
+            ignored = user_dir / "notes.txt"
+
+            primary.write_text("[]\n", encoding="utf-8")
+            first.write_text("[]\n", encoding="utf-8")
+            second.write_text("[]\n", encoding="utf-8")
+            ignored.write_text("ignore\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+
+            self.assertEqual(paths, [
+                primary.resolve(),
+                first.resolve(),
+                second.resolve(),
+            ])
+
+
+class ConfigMergeTests(unittest.TestCase):
+    def test_later_duplicate_names_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "a.yaml"
+            second = Path(tmp) / "b.yaml"
+
+            first.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/a\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/b\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            merged = merge_jobs_from_configs([first, second])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["path"], "~/repo/a")
+
+
 class TaskResultHelpersTests(unittest.TestCase):
     def test_extract_task_state_handles_string_dict_and_unknown(self) -> None:
         self.assertEqual(extract_task_state({"status": "Running"}), "Running")
@@ -433,6 +635,20 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args(["--once", "--force"])
         self.assertTrue(args.once)
         self.assertTrue(args.force)
+
+    def test_accepts_short_flags(self) -> None:
+        args = parse_args(["-o", "-f", "-n", "-c", "cfg.yaml", "-g", "grp", "-t", "9"])
+        self.assertTrue(args.once)
+        self.assertTrue(args.force)
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.config, "cfg.yaml")
+        self.assertEqual(args.group_prefix, "grp")
+        self.assertEqual(args.tick, 9)
+
+    def test_accepts_dev_fallback_flags(self) -> None:
+        args = parse_args(["--no-dev-fallback", "--dev-fallback-config", "/tmp/dev-gfff.yaml"])
+        self.assertTrue(args.no_dev_fallback)
+        self.assertEqual(args.dev_fallback_config, "/tmp/dev-gfff.yaml")
 
 
 class RunLoopTests(unittest.TestCase):

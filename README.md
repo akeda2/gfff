@@ -109,8 +109,9 @@ This script will:
 1. create/update a dedicated venv at `~/.local/share/gfff-buildbot/.venv`
 2. install/upgrade the `gfff-buildbot` package (including `PyYAML`) into that venv
 3. create/update `~/.local/bin/gfff-buildbot` as a symlink to the venv command
-4. install/update `~/.config/systemd/user/gfff-buildbot.service`
-5. reload user systemd and enable/start (or restart) the service
+4. create/update `~/.local/bin/gb` as a symlink to the short command alias
+5. install/update `~/.config/systemd/user/gfff-buildbot.service`
+6. reload user systemd and enable/start (or restart) the service
 
 This avoids `--break-system-packages` on modern Ubuntu and other PEP 668 environments.
 
@@ -140,6 +141,35 @@ Use the PATH command (installed by `install-buildbot.sh`):
 gfff-buildbot
 ```
 
+Short alias:
+
+```bash
+gb
+```
+
+### Config Discovery
+
+If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
+
+1. `./gfff.yaml` (current directory)
+2. local user config directory `~/.config/gfff/`:
+	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
+3. development fallback config from user service `ExecStart --config` (if available)
+4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
+
+Important behavior:
+
+- If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
+- All found configs are merged in order.
+- If a later config contains a job with the same `name` as an earlier config, the later one is ignored.
+
+This makes `~/.config/gfff/` the recommended place for user-local defaults and layered config files.
+
+Optional flags for discovery behavior:
+
+- `--no-dev-fallback`: ignore the development fallback config in auto-discovery.
+- `--dev-fallback-config /path/to/gfff.yaml`: use a custom development fallback config path instead of `~/dev/gfff/gfff.yaml`.
+
 Direct venv path also works:
 
 ```bash
@@ -150,14 +180,29 @@ Useful flags:
 
 ```bash
 # Queue all active jobs once, then exit
-~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --once
+gfff-buildbot --once
 
 # Queue all active jobs once even if git has no updates
-~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --once --force
+gfff-buildbot --once --force
+
+# Same with short aliases (command and flags)
+gb -o -f
 
 # Preview pueue commands without running them
-~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --dry-run
+gfff-buildbot --dry-run
+
+# Short flag aliases
+gfff-buildbot -n -o -f
 ```
+
+Short option aliases:
+
+- `-c` for `--config`
+- `-g` for `--group-prefix`
+- `-t` for `--tick`
+- `-o` for `--once`
+- `-n` for `--dry-run`
+- `-f` for `--force`
 
 `--force` bypasses git update checks and queues the run immediately.
 This is intended for interactive/manual triggering.

@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
+CONFIG_FILENAME = "gfff.yaml"
+USER_CONFIG_PATH = Path(".config/gfff/gfff.yaml")
+DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
+USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
+REPO_SERVICE_FILE = "gfff-buildbot.service"
+
+
 def log_event(level: str, message: str) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{timestamp} {level} {message}")
@@ -42,6 +49,121 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
             raise ValueError(f"Job #{idx} must be a mapping")
         jobs.append(item)
     return jobs
+
+
+def parse_config_path_from_service(service_path: Path) -> Optional[Path]:
+    if not service_path.is_file():
+        return None
+
+    try:
+        lines = service_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("ExecStart="):
+            continue
+
+        command = line.split("=", 1)[1].strip()
+        if not command:
+            continue
+
+        command = command.replace("%h", str(Path.home()))
+        try:
+            args = shlex.split(command)
+        except ValueError:
+            continue
+
+        for idx, arg in enumerate(args):
+            if arg == "--config" and idx + 1 < len(args):
+                return Path(args[idx + 1]).expanduser().resolve()
+            if arg.startswith("--config="):
+                return Path(arg.split("=", 1)[1]).expanduser().resolve()
+
+    return None
+
+
+def infer_dev_fallback_config_path(explicit_path: Optional[Path] = None) -> Path:
+    if explicit_path is not None:
+        return explicit_path.resolve()
+
+    home = Path.home()
+    installed_service = (home / USER_SERVICE_PATH).resolve()
+    service_cfg = parse_config_path_from_service(installed_service)
+    if service_cfg is not None:
+        return service_cfg
+
+    repo_service = (Path(__file__).resolve().parent / REPO_SERVICE_FILE).resolve()
+    repo_service_cfg = parse_config_path_from_service(repo_service)
+    if repo_service_cfg is not None:
+        return repo_service_cfg
+
+    return (home / DEV_REPO_CONFIG_PATH).resolve()
+
+
+def discover_default_config_paths(
+    include_dev_fallback: bool = True,
+    dev_fallback_config: Optional[Path] = None,
+) -> List[Path]:
+    cwd_config = (Path.cwd() / CONFIG_FILENAME).resolve()
+    home = Path.home()
+    user_config_dir = (home / USER_CONFIG_PATH.parent).resolve()
+    user_primary_config = (home / USER_CONFIG_PATH).resolve()
+    dev_config = infer_dev_fallback_config_path(explicit_path=dev_fallback_config)
+
+    paths: List[Path] = []
+
+    # Rule 1: current directory config, unless it is also the dev config path.
+    if cwd_config.is_file() and (not include_dev_fallback or cwd_config != dev_config):
+        paths.append(cwd_config)
+
+    # Rule 2: local user configs.
+    # gfff.yaml is loaded first, then any other *.yaml files in lexical order.
+    user_candidates: List[Path] = []
+    if user_primary_config.is_file():
+        user_candidates.append(user_primary_config)
+
+    if user_config_dir.is_dir():
+        for candidate in sorted(user_config_dir.glob("*.yaml")):
+            resolved = candidate.resolve()
+            if resolved == user_primary_config:
+                continue
+            user_candidates.append(resolved)
+
+    for user_config in user_candidates:
+        if user_config == dev_config:
+            # Keep dev fallback as the last source by design.
+            continue
+        if user_config not in paths:
+            paths.append(user_config)
+
+    # Rule 3: dev repo config (always considered last when present).
+    if include_dev_fallback and dev_config.is_file() and dev_config not in paths:
+        paths.append(dev_config)
+
+    return paths
+
+
+def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    for config_path in config_paths:
+        jobs = load_yaml_config(config_path)
+        for idx, job in enumerate(jobs, start=1):
+            raw_name = str(job.get("name", "")).strip()
+            dedupe_key = raw_name if raw_name else f"__unnamed__:{config_path}:{idx}"
+            if dedupe_key in seen_names:
+                log_event(
+                    "INFO",
+                    f"skip duplicate job name '{raw_name}' from {config_path}",
+                )
+                continue
+            seen_names.add(dedupe_key)
+            merged.append(job)
+
+    return merged
 
 
 def sanitize_name(name: str) -> str:
@@ -575,35 +697,54 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         description="Run periodic pueue build tasks from gfff.yaml"
     )
     parser.add_argument(
+        "-c",
         "--config",
-        default="gfff.yaml",
-        help="Path to gfff yaml config file (default: gfff.yaml)",
+        default=None,
+        help="Path to a gfff yaml config file. When omitted, auto-discovery is used.",
     )
     parser.add_argument(
+        "-g",
         "--group-prefix",
         default="gfff",
         help="Shared pueue group name for all builds (default: gfff)",
     )
     parser.add_argument(
+        "-t",
         "--tick",
         type=int,
         default=5,
         help="Scheduler polling interval in seconds (default: 5)",
     )
     parser.add_argument(
+        "-o",
         "--once",
         action="store_true",
         help="Queue eligible jobs once and exit",
     )
     parser.add_argument(
+        "-n",
         "--dry-run",
         action="store_true",
         help="Print pueue commands without executing them",
     )
     parser.add_argument(
+        "-f",
         "--force",
         action="store_true",
         help="Queue runs even when git has no updates (useful with --once)",
+    )
+    parser.add_argument(
+        "--no-dev-fallback",
+        action="store_true",
+        help="Do not include the development repo config in default config discovery",
+    )
+    parser.add_argument(
+        "--dev-fallback-config",
+        default=None,
+        help=(
+            "Path to development fallback config used by default config discovery "
+            "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/gfff.yaml)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -612,8 +753,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         check_dependencies()
-        config_path = Path(args.config).expanduser().resolve()
-        jobs = normalize_jobs(load_yaml_config(config_path))
+        config_paths: List[Path]
+        if args.config:
+            config_paths = [Path(args.config).expanduser().resolve()]
+        else:
+            dev_fallback_config = (
+                Path(args.dev_fallback_config).expanduser().resolve()
+                if args.dev_fallback_config
+                else None
+            )
+            config_paths = discover_default_config_paths(
+                include_dev_fallback=not args.no_dev_fallback,
+                dev_fallback_config=dev_fallback_config,
+            )
+            if not config_paths:
+                raise RuntimeError(
+                    "No config found. Searched: ./gfff.yaml, ~/.config/gfff/gfff.yaml"
+                    + (
+                        ""
+                        if args.no_dev_fallback
+                        else ", "
+                        + str(
+                            infer_dev_fallback_config_path(explicit_path=dev_fallback_config)
+                        )
+                    )
+                )
+
+        for config_path in config_paths:
+            log_event("INFO", f"using config: {config_path}")
+
+        jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,
