@@ -37,3 +37,8 @@
   test: python3 -m unittest discover -s tests
   build: ./install-buildbot.sh
   interval: 3600
+- name: brec
+  path: ~/dev/brec
+  active: true
+  test: ./brec doctor --skip-device-check
+  interval: 3600
