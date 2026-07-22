@@ -89,8 +89,9 @@ This script will:
 
 1. create/update a dedicated venv at `~/.local/share/gfff-buildbot/.venv`
 2. install/upgrade the `gfff-buildbot` package (including `PyYAML`) into that venv
-3. install/update `~/.config/systemd/user/gfff-buildbot.service`
-4. reload user systemd and enable/start (or restart) the service
+3. create/update `~/.local/bin/gfff-buildbot` as a symlink to the venv command
+4. install/update `~/.config/systemd/user/gfff-buildbot.service`
+5. reload user systemd and enable/start (or restart) the service
 
 This avoids `--break-system-packages` on modern Ubuntu and other PEP 668 environments.
 
@@ -114,7 +115,13 @@ python3 -m venv ~/.local/share/gfff-buildbot/.venv
 
 ### Run
 
-Use the venv-installed command:
+Use the PATH command (installed by `install-buildbot.sh`):
+
+```bash
+gfff-buildbot
+```
+
+Direct venv path also works:
 
 ```bash
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot
