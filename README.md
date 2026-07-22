@@ -7,8 +7,11 @@ Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
 
-The scheduler does not override pueue parallelism. Configure concurrency with
-pueue itself (globally or for the selected group) based on your machine capacity.
+On startup, `gfff-buildbot` sets the `gfff` pueue group parallelism to the
+detected CPU thread count.
+
+You can still adjust concurrency with pueue commands (globally or for the
+selected group) based on your machine capacity.
 
 Example pueue concurrency commands:
 

@@ -167,8 +167,8 @@ def ensure_pueue_group(group: str, dry_run: bool) -> None:
     raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
-def set_group_parallelism(group: str, dry_run: bool) -> None:
-    cmd = ["pueue", "parallel", "-g", group, "1"]
+def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
+    cmd = ["pueue", "parallel", "-g", group, str(parallelism)]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -504,7 +504,10 @@ def run_loop(
         return 0
 
     shared_group = group_prefix
+    cpu_threads = max(1, os.cpu_count() or 1)
     ensure_pueue_group(shared_group, dry_run=dry_run)
+    set_group_parallelism(shared_group, parallelism=cpu_threads, dry_run=dry_run)
+    log_event("INFO", f"configured pueue group '{shared_group}' parallelism to {cpu_threads}")
 
     now = time.time()
     next_runs: Dict[str, float] = {}
