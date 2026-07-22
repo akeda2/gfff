@@ -127,6 +127,20 @@ Useful flags:
 ~/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --dry-run
 ```
 
+### Tests
+
+Run the buildbot unit tests:
+
+```bash
+python3 -m unittest discover -s tests -q
+```
+
+In CI or other isolated environments, run with an explicit interpreter path, for example:
+
+```bash
+./.venv/bin/python -m unittest discover -s tests -q
+```
+
 ### Legacy User-Site Install (may fail on modern Ubuntu)
 
 ```bash
