@@ -40,5 +40,5 @@
 - name: brec
   path: ~/dev/brec
   active: true
-  test: ./brec doctor --skip-device-check
+  test: python3 ./brec.py doctor --skip-device-check
   interval: 3600
