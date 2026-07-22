@@ -108,7 +108,8 @@ def discover_default_config_paths(
 ) -> List[Path]:
     cwd_config = (Path.cwd() / CONFIG_FILENAME).resolve()
     home = Path.home()
-    user_config = (home / USER_CONFIG_PATH).resolve()
+    user_config_dir = (home / USER_CONFIG_PATH.parent).resolve()
+    user_primary_config = (home / USER_CONFIG_PATH).resolve()
     dev_config = infer_dev_fallback_config_path(explicit_path=dev_fallback_config)
 
     paths: List[Path] = []
@@ -117,9 +118,25 @@ def discover_default_config_paths(
     if cwd_config.is_file() and (not include_dev_fallback or cwd_config != dev_config):
         paths.append(cwd_config)
 
-    # Rule 2: local user config.
-    if user_config.is_file() and user_config not in paths:
-        paths.append(user_config)
+    # Rule 2: local user configs.
+    # gfff.yaml is loaded first, then any other *.yaml files in lexical order.
+    user_candidates: List[Path] = []
+    if user_primary_config.is_file():
+        user_candidates.append(user_primary_config)
+
+    if user_config_dir.is_dir():
+        for candidate in sorted(user_config_dir.glob("*.yaml")):
+            resolved = candidate.resolve()
+            if resolved == user_primary_config:
+                continue
+            user_candidates.append(resolved)
+
+    for user_config in user_candidates:
+        if user_config == dev_config:
+            # Keep dev fallback as the last source by design.
+            continue
+        if user_config not in paths:
+            paths.append(user_config)
 
     # Rule 3: dev repo config (always considered last when present).
     if include_dev_fallback and dev_config.is_file() and dev_config not in paths:

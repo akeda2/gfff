@@ -152,7 +152,8 @@ gb
 If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
 
 1. `./gfff.yaml` (current directory)
-2. `~/.config/gfff/gfff.yaml` (local user config)
+2. local user config directory `~/.config/gfff/`:
+	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
 3. development fallback config from user service `ExecStart --config` (if available)
 4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
 
@@ -162,7 +163,7 @@ Important behavior:
 - All found configs are merged in order.
 - If a later config contains a job with the same `name` as an earlier config, the later one is ignored.
 
-This makes `~/.config/gfff/gfff.yaml` the recommended place for user-local defaults.
+This makes `~/.config/gfff/` the recommended place for user-local defaults and layered config files.
 
 Optional flags for discovery behavior:
 

@@ -406,6 +406,36 @@ class ConfigDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(paths, [user_config.resolve(), service_cfg.resolve()])
 
+    def test_user_config_directory_loads_gfff_then_sorted_yaml_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_dir = home / ".config" / "gfff"
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+            primary = user_dir / "gfff.yaml"
+            first = user_dir / "10firstlist.yaml"
+            second = user_dir / "30secondlist.yaml"
+            ignored = user_dir / "notes.txt"
+
+            primary.write_text("[]\n", encoding="utf-8")
+            first.write_text("[]\n", encoding="utf-8")
+            second.write_text("[]\n", encoding="utf-8")
+            ignored.write_text("ignore\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+
+            self.assertEqual(paths, [
+                primary.resolve(),
+                first.resolve(),
+                second.resolve(),
+            ])
+
 
 class ConfigMergeTests(unittest.TestCase):
     def test_later_duplicate_names_are_ignored(self) -> None:
