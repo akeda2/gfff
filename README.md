@@ -1,11 +1,6 @@
 # gfff
-git fetch and forward
 
-Fetches from remote and returns true or false.
-```
-gfff && echo "Updates available!" || echo "No updates"
-```
-See ```rsb.sh``` for a rust/cargo build example.
+Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 
 ## Python buildbot (`pueue`)
 
@@ -65,14 +60,6 @@ At least one of `test` or `build` must be set for an active job.
 - `pueue`
 - `git`
 - Python 3
-
-### Install Shell Scripts
-
-Use `inst.sh` when you only want the helper shell scripts used by other workflows:
-
-```bash
-bash inst.sh
-```
 
 ### Install Buildbot (Package + Service)
 
@@ -172,3 +159,27 @@ Notes:
 
 - The unit expects this repo at `%h/dev/gfff`.
 - The service runs `%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot`.
+
+## Legacy Shell Scripts
+
+The shell helpers remain available for older workflows.
+
+### gfff Script
+
+Fetches from remote and returns true or false:
+
+```bash
+gfff && echo "Updates available!" || echo "No updates"
+```
+
+### Rust Build Example
+
+See `rsb.sh` for a rust/cargo build example.
+
+### Install Legacy Shell Scripts
+
+Use `inst.sh` when you only want the helper shell scripts used by legacy workflows:
+
+```bash
+bash inst.sh
+```
