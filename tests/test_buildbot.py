@@ -434,6 +434,15 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.once)
         self.assertTrue(args.force)
 
+    def test_accepts_short_flags(self) -> None:
+        args = parse_args(["-o", "-f", "-n", "-c", "cfg.yaml", "-g", "grp", "-t", "9"])
+        self.assertTrue(args.once)
+        self.assertTrue(args.force)
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.config, "cfg.yaml")
+        self.assertEqual(args.group_prefix, "grp")
+        self.assertEqual(args.tick, 9)
+
 
 class RunLoopTests(unittest.TestCase):
     def test_once_force_queues_at_job_immediately(self) -> None:

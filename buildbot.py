@@ -575,32 +575,38 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         description="Run periodic pueue build tasks from gfff.yaml"
     )
     parser.add_argument(
+        "-c",
         "--config",
         default="gfff.yaml",
         help="Path to gfff yaml config file (default: gfff.yaml)",
     )
     parser.add_argument(
+        "-g",
         "--group-prefix",
         default="gfff",
         help="Shared pueue group name for all builds (default: gfff)",
     )
     parser.add_argument(
+        "-t",
         "--tick",
         type=int,
         default=5,
         help="Scheduler polling interval in seconds (default: 5)",
     )
     parser.add_argument(
+        "-o",
         "--once",
         action="store_true",
         help="Queue eligible jobs once and exit",
     )
     parser.add_argument(
+        "-n",
         "--dry-run",
         action="store_true",
         help="Print pueue commands without executing them",
     )
     parser.add_argument(
+        "-f",
         "--force",
         action="store_true",
         help="Queue runs even when git has no updates (useful with --once)",
