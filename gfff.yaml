@@ -34,5 +34,6 @@
 - name: gfff
   active: true
   path: ~/dev/gfff
+  test: python3 -m unittest discover -s tests
   build: ./install-buildbot.sh
   interval: 3600
