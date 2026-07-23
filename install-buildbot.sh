@@ -12,6 +12,7 @@ BOT_ALIAS_LINK="${USER_BIN_DIR}/gb"
 SERVICE_SRC="${SCRIPT_DIR}/gfff-buildbot.service"
 SERVICE_DST_DIR="${HOME}/.config/systemd/user"
 SERVICE_DST="${SERVICE_DST_DIR}/gfff-buildbot.service"
+GFFF_CONFIG_DIR="${HOME}/.config/gfff"
 
 cd "${SCRIPT_DIR}"
 
@@ -30,6 +31,9 @@ ln -sfn "${BOT_CMD_SRC}" "${BOT_CMD_LINK}"
 ln -sfn "${BOT_ALIAS_SRC}" "${BOT_ALIAS_LINK}"
 echo "gfff-buildbot command link install/update SUCCESS! (${BOT_CMD_LINK} -> ${BOT_CMD_SRC})"
 echo "gb command link install/update SUCCESS! (${BOT_ALIAS_LINK} -> ${BOT_ALIAS_SRC})"
+
+mkdir -p "${GFFF_CONFIG_DIR}"
+echo "gfff config directory ensured SUCCESS! (${GFFF_CONFIG_DIR})"
 
 case ":${PATH}:" in
     *":${USER_BIN_DIR}:"*) ;;

@@ -135,8 +135,9 @@ This script will:
 2. install/upgrade the `gfff-buildbot` package (including `PyYAML`) into that venv
 3. create/update `~/.local/bin/gfff-buildbot` as a symlink to the venv command
 4. create/update `~/.local/bin/gb` as a symlink to the short command alias
-5. install/update `~/.config/systemd/user/gfff-buildbot.service`
-6. reload user systemd and enable/start (or restart) the service
+5. create `~/.config/gfff/` if it does not exist
+6. install/update `~/.config/systemd/user/gfff-buildbot.service`
+7. reload user systemd and enable/start (or restart) the service
 
 This avoids `--break-system-packages` on modern Ubuntu and other PEP 668 environments.
 
