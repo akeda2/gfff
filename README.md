@@ -221,6 +221,14 @@ gfff-buildbot --dry-run
 gfff-buildbot -n -o -f
 ```
 
+Run only one specific job by exact `name` (config discovery order is unchanged):
+
+```bash
+gb name-of-list-entry
+gb -o name-of-list-entry
+gb -o -f name-of-list-entry
+```
+
 Short option aliases:
 
 - `-c` for `--config`

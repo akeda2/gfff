@@ -731,6 +731,13 @@ def run_loop(
         time.sleep(max(1, tick))
 
 
+def filter_jobs_by_name(jobs: List[Dict[str, Any]], job_name: str) -> List[Dict[str, Any]]:
+    target = job_name.strip()
+    if not target:
+        raise ValueError("Job name filter cannot be empty")
+    return [job for job in jobs if str(job.get("name", "")).strip() == target]
+
+
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run periodic pueue build tasks from gfff.yaml"
@@ -785,6 +792,11 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
             "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/gfff.yaml)"
         ),
     )
+    parser.add_argument(
+        "job_name",
+        nargs="?",
+        help="Only run the job with this exact config name",
+    )
     return parser.parse_args(argv)
 
 
@@ -822,6 +834,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             log_event("INFO", f"using config: {config_path}")
 
         jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
+        if args.job_name:
+            jobs = filter_jobs_by_name(jobs, args.job_name)
+            if not jobs:
+                raise RuntimeError(
+                    f"No active job matched name: {args.job_name}. "
+                    "Config files were loaded in normal discovery order."
+                )
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,

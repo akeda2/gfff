@@ -13,6 +13,7 @@ from buildbot import (
     discover_default_config_paths,
     extract_done_result,
     extract_task_state,
+    filter_jobs_by_name,
     generate_build_script,
     load_yaml_config,
     log_finished_task_outcomes,
@@ -704,6 +705,31 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args(["--no-dev-fallback", "--dev-fallback-config", "/tmp/dev-gfff.yaml"])
         self.assertTrue(args.no_dev_fallback)
         self.assertEqual(args.dev_fallback_config, "/tmp/dev-gfff.yaml")
+
+    def test_accepts_positional_job_name(self) -> None:
+        args = parse_args(["my-job"])
+        self.assertEqual(args.job_name, "my-job")
+
+    def test_accepts_job_name_with_other_flags(self) -> None:
+        args = parse_args(["-o", "-f", "my-job"])
+        self.assertTrue(args.once)
+        self.assertTrue(args.force)
+        self.assertEqual(args.job_name, "my-job")
+
+
+class JobNameFilterTests(unittest.TestCase):
+    def test_filters_to_exact_name(self) -> None:
+        jobs = [
+            {"name": "alpha", "slug": "alpha"},
+            {"name": "beta", "slug": "beta"},
+        ]
+        filtered = filter_jobs_by_name(jobs, "beta")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "beta")
+
+    def test_rejects_empty_filter(self) -> None:
+        with self.assertRaises(ValueError):
+            filter_jobs_by_name([{"name": "alpha"}], "   ")
 
 
 class RunLoopTests(unittest.TestCase):
