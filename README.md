@@ -219,6 +219,18 @@ gfff-buildbot --dry-run
 
 # Short flag aliases
 gfff-buildbot -n -o -f
+
+# Validate a config file
+gfff-buildbot --check /path/to/configfile.yaml
+gfff-buildbot -C /path/to/configfile.yaml
+
+# Validate and import into ~/.config/gfff/
+gfff-buildbot --import /path/to/configfile.yaml
+gfff-buildbot -I /path/to/configfile.yaml
+
+# Overwrite existing target file during import
+gfff-buildbot --import /path/to/configfile.yaml --overwrite
+gfff-buildbot -I /path/to/configfile.yaml -w
 ```
 
 Run only one specific job by exact `name` (config discovery order is unchanged):

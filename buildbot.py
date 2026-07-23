@@ -738,6 +738,13 @@ def filter_jobs_by_name(jobs: List[Dict[str, Any]], job_name: str) -> List[Dict[
     return [job for job in jobs if str(job.get("name", "")).strip() == target]
 
 
+def validate_config_file(config_path: Path) -> List[Dict[str, Any]]:
+    if not config_path.is_file():
+        raise RuntimeError(f"Config file not found: {config_path}")
+    jobs = normalize_jobs(load_yaml_config(config_path))
+    return jobs
+
+
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run periodic pueue build tasks from gfff.yaml"
@@ -780,6 +787,26 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="Queue runs even when git has no updates (useful with --once)",
     )
     parser.add_argument(
+        "-C",
+        "--check",
+        dest="check_config",
+        default=None,
+        help="Validate a config file and exit",
+    )
+    parser.add_argument(
+        "-I",
+        "--import",
+        dest="import_config",
+        default=None,
+        help="Validate a config file, then copy it into ~/.config/gfff/",
+    )
+    parser.add_argument(
+        "-w",
+        "--overwrite",
+        action="store_true",
+        help="Allow --import to overwrite an existing file with the same name",
+    )
+    parser.add_argument(
         "--no-dev-fallback",
         action="store_true",
         help="Do not include the development repo config in default config discovery",
@@ -803,6 +830,34 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
+        if args.check_config and args.import_config:
+            raise RuntimeError("Use only one of --check or --import")
+        if args.overwrite and not args.import_config:
+            raise RuntimeError("--overwrite can only be used together with --import")
+
+        if args.check_config:
+            config_path = Path(args.check_config).expanduser().resolve()
+            jobs = validate_config_file(config_path)
+            print(f"OK: {config_path} is valid ({len(jobs)} active job(s))")
+            return 0
+
+        if args.import_config:
+            source_path = Path(args.import_config).expanduser().resolve()
+            jobs = validate_config_file(source_path)
+            target_dir = (Path.home() / USER_CONFIG_PATH.parent).resolve()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / source_path.name
+            if target_path.exists() and not args.overwrite:
+                raise RuntimeError(
+                    f"Target already exists: {target_path}. Use --overwrite to replace it."
+                )
+            shutil.copy2(source_path, target_path)
+            print(
+                f"OK: imported {source_path} to {target_path} "
+                f"({len(jobs)} active job(s))"
+            )
+            return 0
+
         check_dependencies()
         config_paths: List[Path]
         if args.config:

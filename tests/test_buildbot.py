@@ -710,6 +710,30 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args(["my-job"])
         self.assertEqual(args.job_name, "my-job")
 
+    def test_accepts_check_flag(self) -> None:
+        args = parse_args(["--check", "cfg.yaml"])
+        self.assertEqual(args.check_config, "cfg.yaml")
+
+    def test_accepts_import_flag(self) -> None:
+        args = parse_args(["--import", "cfg.yaml"])
+        self.assertEqual(args.import_config, "cfg.yaml")
+
+    def test_accepts_check_short_alias(self) -> None:
+        args = parse_args(["-C", "cfg.yaml"])
+        self.assertEqual(args.check_config, "cfg.yaml")
+
+    def test_accepts_import_short_alias(self) -> None:
+        args = parse_args(["-I", "cfg.yaml"])
+        self.assertEqual(args.import_config, "cfg.yaml")
+
+    def test_accepts_overwrite_flag(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "--overwrite"])
+        self.assertTrue(args.overwrite)
+
+    def test_accepts_overwrite_short_alias(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "-w"])
+        self.assertTrue(args.overwrite)
+
     def test_accepts_job_name_with_other_flags(self) -> None:
         args = parse_args(["-o", "-f", "my-job"])
         self.assertTrue(args.once)
@@ -807,6 +831,145 @@ class RunLoopTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(queue_mock.call_count, 2)
+
+
+class MainCheckImportTests(unittest.TestCase):
+    def test_check_validates_and_exits_without_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cfg.yaml"
+            cfg.write_text(
+                "- name: check-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  test: pytest -q\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with patch.object(buildbot, "check_dependencies") as dep_mock:
+                    rc = buildbot.main(["--check", str(cfg)])
+
+        self.assertEqual(rc, 0)
+        dep_mock.assert_not_called()
+        self.assertIn("OK:", output.getvalue())
+
+    def test_import_validates_and_copies_to_user_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot, "check_dependencies") as dep_mock:
+                        rc = buildbot.main(["--import", str(cfg)])
+
+            copied = home / ".config" / "gfff" / "custom.yaml"
+            self.assertTrue(copied.is_file())
+            self.assertEqual(copied.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            dep_mock.assert_not_called()
+            self.assertIn("OK: imported", output.getvalue())
+
+    def test_check_and_import_together_fails(self) -> None:
+        rc = buildbot.main(["--check", "a.yaml", "--import", "b.yaml"])
+        self.assertEqual(rc, 1)
+
+    def test_check_invalid_config_fails_gracefully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "bad.yaml"
+            cfg.write_text("name: invalid\n", encoding="utf-8")
+
+            rc = buildbot.main(["--check", str(cfg)])
+
+        self.assertEqual(rc, 1)
+
+    def test_overwrite_without_import_fails(self) -> None:
+        rc = buildbot.main(["--overwrite"])
+        self.assertEqual(rc, 1)
+
+    def test_import_existing_file_without_overwrite_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg)])
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+
+    def test_import_existing_file_with_overwrite_replaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg), "--overwrite"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
+
+    def test_import_existing_file_with_overwrite_short_alias_replaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg), "-w"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
