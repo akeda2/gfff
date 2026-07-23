@@ -43,6 +43,11 @@ Only the build phase is queued in `pueue`:
 `test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
 If a repo is test-only, omit `build` and set only `test`.
 
+`cleanup`, `pre-build`, and `post-build` accept either:
+
+- a single command string
+- a YAML list of commands (run in listed order)
+
 Scheduling supports two modes per active job:
 
 - `interval`: run every N seconds
@@ -74,6 +79,26 @@ Example:
 	test: pytest -q --tb=short
 	build: make
 	manual-install-cmd: sudo make install
+	interval: 3600
+```
+
+Multi-step hook example:
+
+```yaml
+- name: hook-heavy-repo
+	active: true
+	path: ~/dev/hook-heavy-repo
+	cleanup:
+	  - git clean -fdx
+	  - rm -rf .pytest_cache
+	pre-build:
+	  - ./scripts/bootstrap.sh
+	  - ./scripts/generate-config.sh
+	test: pytest -q
+	build: make release
+	post-build:
+	  - ./scripts/publish-artifacts.sh
+	  - ./scripts/notify.sh
 	interval: 3600
 ```
 

@@ -22,6 +22,7 @@ from buildbot import (
     next_daily_at_timestamp,
     parse_config_path_from_service,
     parse_bool,
+    parse_command_steps,
     parse_at_time,
     parse_args,
     prepare_repo_for_build,
@@ -169,6 +170,24 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["git_remote_ref"], "@{u}")
         self.assertTrue(jobs[0]["git_strict"])
 
+    def test_supports_pre_and_post_build_as_lists(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "multi-steps",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "pre-build": ["echo prep1", "echo prep2"],
+                    "post-build": ["echo post1", "echo post2"],
+                }
+            ]
+        )
+
+        self.assertEqual(jobs[0]["pre_build_steps"], ["echo prep1", "echo prep2"])
+        self.assertEqual(jobs[0]["post_build_steps"], ["echo post1", "echo post2"])
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -207,6 +226,33 @@ class GenerateBuildScriptTests(unittest.TestCase):
         script = generate_build_script(job)
         self.assertEqual(script.splitlines(), ["set -e", "cd '~/repo'", "pytest -q"])
 
+    def test_supports_multiple_pre_and_post_build_steps(self) -> None:
+        job = {
+            "path": "~/repo",
+            "cleanup_steps": ["echo cleanup1", "echo cleanup2"],
+            "pre_build_steps": ["echo pre1", "echo pre2"],
+            "test": "pytest -q",
+            "build": "make",
+            "post_build_steps": ["echo post1", "echo post2"],
+        }
+
+        script = generate_build_script(job)
+        self.assertEqual(
+            script.splitlines(),
+            [
+                "set -e",
+                "cd '~/repo'",
+                "echo cleanup1",
+                "echo cleanup2",
+                "echo pre1",
+                "echo pre2",
+                "pytest -q",
+                "make",
+                "echo post1",
+                "echo post2",
+            ],
+        )
+
 
 class PrimitiveFunctionTests(unittest.TestCase):
     def test_parse_bool_accepts_strings_and_bools(self) -> None:
@@ -229,6 +275,15 @@ class PrimitiveFunctionTests(unittest.TestCase):
             parse_at_time("5:00", "job")
         with self.assertRaises(ValueError):
             parse_at_time("24:00", "job")
+
+    def test_parse_command_steps(self) -> None:
+        self.assertEqual(parse_command_steps("echo hi", "pre-build", "job"), ["echo hi"])
+        self.assertEqual(
+            parse_command_steps(["echo one", "  ", "echo two"], "pre-build", "job"),
+            ["echo one", "echo two"],
+        )
+        with self.assertRaises(ValueError):
+            parse_command_steps(["ok", 1], "pre-build", "job")
 
     def test_next_daily_at_timestamp(self) -> None:
         now = dt.datetime(2026, 1, 2, 4, 30, 0).timestamp()

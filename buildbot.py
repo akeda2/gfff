@@ -183,6 +183,29 @@ def parse_bool(value: Any, field: str, job_name: str) -> bool:
     raise ValueError(f"Job '{job_name}' has invalid '{field}': {value}")
 
 
+def parse_command_steps(value: Any, field: str, job_name: str) -> List[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        step = value.strip()
+        return [step] if step else []
+
+    if isinstance(value, list):
+        steps: List[str] = []
+        for idx, item in enumerate(value, start=1):
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"Job '{job_name}' has invalid '{field}' item at position {idx}: {item!r}"
+                )
+            step = item.strip()
+            if step:
+                steps.append(step)
+        return steps
+
+    raise ValueError(f"Job '{job_name}' has invalid '{field}': {value!r}")
+
+
 def parse_at_time(value: Any, job_name: str) -> str:
     at = str(value).strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
@@ -243,6 +266,9 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
+        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
+        pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
+        post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -260,9 +286,9 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "test": test,
                 "interval": interval_s,
                 "at": at_s,
-                "cleanup": str(job.get("cleanup", "")).strip(),
-                "pre_build": str(job.get("pre-build", "")).strip(),
-                "post_build": str(job.get("post-build", "")).strip(),
+                "cleanup_steps": cleanup_steps,
+                "pre_build_steps": pre_build_steps,
+                "post_build_steps": post_build_steps,
                 "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
                 "git_strict": git_strict,
                 "git_pull": git_pull,
@@ -303,16 +329,29 @@ def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
 def generate_build_script(job: Dict[str, Any]) -> str:
     lines = ["set -e", f"cd {shlex.quote(job['path'])}"]
 
-    if job["cleanup"]:
-        lines.append(job["cleanup"])
-    if job["pre_build"]:
-        lines.append(job["pre_build"])
+    cleanup_steps = parse_command_steps(
+        job.get("cleanup_steps", job.get("cleanup", "")),
+        "cleanup",
+        str(job.get("name", "job")),
+    )
+    pre_build_steps = parse_command_steps(
+        job.get("pre_build_steps", job.get("pre_build", "")),
+        "pre-build",
+        str(job.get("name", "job")),
+    )
+    post_build_steps = parse_command_steps(
+        job.get("post_build_steps", job.get("post_build", "")),
+        "post-build",
+        str(job.get("name", "job")),
+    )
+
+    lines.extend(cleanup_steps)
+    lines.extend(pre_build_steps)
     if job.get("test"):
         lines.append(str(job["test"]))
     if job.get("build"):
         lines.append(str(job["build"]))
-    if job["post_build"]:
-        lines.append(job["post_build"])
+    lines.extend(post_build_steps)
 
     return "\n".join(lines)
 
