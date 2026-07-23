@@ -28,8 +28,8 @@
   path: ~/dev/eb
   git-remote-ref: origin/rework
   git-pull: git pull origin rework --ff-only
-  test: make test
-  build: pytest -q --tb=short
+  test: make test && pytest -q --tb=short
+  build: which pipx && pipx install . --force
   interval: 3600
 - name: gfff
   active: true

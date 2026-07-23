@@ -13,6 +13,7 @@ from buildbot import (
     discover_default_config_paths,
     extract_done_result,
     extract_task_state,
+    filter_jobs_by_name,
     generate_build_script,
     load_yaml_config,
     log_finished_task_outcomes,
@@ -22,6 +23,7 @@ from buildbot import (
     next_daily_at_timestamp,
     parse_config_path_from_service,
     parse_bool,
+    parse_command_steps,
     parse_at_time,
     parse_args,
     prepare_repo_for_build,
@@ -169,6 +171,24 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["git_remote_ref"], "@{u}")
         self.assertTrue(jobs[0]["git_strict"])
 
+    def test_supports_pre_and_post_build_as_lists(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "multi-steps",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "pre-build": ["echo prep1", "echo prep2"],
+                    "post-build": ["echo post1", "echo post2"],
+                }
+            ]
+        )
+
+        self.assertEqual(jobs[0]["pre_build_steps"], ["echo prep1", "echo prep2"])
+        self.assertEqual(jobs[0]["post_build_steps"], ["echo post1", "echo post2"])
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -207,6 +227,33 @@ class GenerateBuildScriptTests(unittest.TestCase):
         script = generate_build_script(job)
         self.assertEqual(script.splitlines(), ["set -e", "cd '~/repo'", "pytest -q"])
 
+    def test_supports_multiple_pre_and_post_build_steps(self) -> None:
+        job = {
+            "path": "~/repo",
+            "cleanup_steps": ["echo cleanup1", "echo cleanup2"],
+            "pre_build_steps": ["echo pre1", "echo pre2"],
+            "test": "pytest -q",
+            "build": "make",
+            "post_build_steps": ["echo post1", "echo post2"],
+        }
+
+        script = generate_build_script(job)
+        self.assertEqual(
+            script.splitlines(),
+            [
+                "set -e",
+                "cd '~/repo'",
+                "echo cleanup1",
+                "echo cleanup2",
+                "echo pre1",
+                "echo pre2",
+                "pytest -q",
+                "make",
+                "echo post1",
+                "echo post2",
+            ],
+        )
+
 
 class PrimitiveFunctionTests(unittest.TestCase):
     def test_parse_bool_accepts_strings_and_bools(self) -> None:
@@ -229,6 +276,15 @@ class PrimitiveFunctionTests(unittest.TestCase):
             parse_at_time("5:00", "job")
         with self.assertRaises(ValueError):
             parse_at_time("24:00", "job")
+
+    def test_parse_command_steps(self) -> None:
+        self.assertEqual(parse_command_steps("echo hi", "pre-build", "job"), ["echo hi"])
+        self.assertEqual(
+            parse_command_steps(["echo one", "  ", "echo two"], "pre-build", "job"),
+            ["echo one", "echo two"],
+        )
+        with self.assertRaises(ValueError):
+            parse_command_steps(["ok", 1], "pre-build", "job")
 
     def test_next_daily_at_timestamp(self) -> None:
         now = dt.datetime(2026, 1, 2, 4, 30, 0).timestamp()
@@ -650,6 +706,55 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.no_dev_fallback)
         self.assertEqual(args.dev_fallback_config, "/tmp/dev-gfff.yaml")
 
+    def test_accepts_positional_job_name(self) -> None:
+        args = parse_args(["my-job"])
+        self.assertEqual(args.job_name, "my-job")
+
+    def test_accepts_check_flag(self) -> None:
+        args = parse_args(["--check", "cfg.yaml"])
+        self.assertEqual(args.check_config, "cfg.yaml")
+
+    def test_accepts_import_flag(self) -> None:
+        args = parse_args(["--import", "cfg.yaml"])
+        self.assertEqual(args.import_config, "cfg.yaml")
+
+    def test_accepts_check_short_alias(self) -> None:
+        args = parse_args(["-C", "cfg.yaml"])
+        self.assertEqual(args.check_config, "cfg.yaml")
+
+    def test_accepts_import_short_alias(self) -> None:
+        args = parse_args(["-I", "cfg.yaml"])
+        self.assertEqual(args.import_config, "cfg.yaml")
+
+    def test_accepts_overwrite_flag(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "--overwrite"])
+        self.assertTrue(args.overwrite)
+
+    def test_accepts_overwrite_short_alias(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "-w"])
+        self.assertTrue(args.overwrite)
+
+    def test_accepts_job_name_with_other_flags(self) -> None:
+        args = parse_args(["-o", "-f", "my-job"])
+        self.assertTrue(args.once)
+        self.assertTrue(args.force)
+        self.assertEqual(args.job_name, "my-job")
+
+
+class JobNameFilterTests(unittest.TestCase):
+    def test_filters_to_exact_name(self) -> None:
+        jobs = [
+            {"name": "alpha", "slug": "alpha"},
+            {"name": "beta", "slug": "beta"},
+        ]
+        filtered = filter_jobs_by_name(jobs, "beta")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "beta")
+
+    def test_rejects_empty_filter(self) -> None:
+        with self.assertRaises(ValueError):
+            filter_jobs_by_name([{"name": "alpha"}], "   ")
+
 
 class RunLoopTests(unittest.TestCase):
     def test_once_force_queues_at_job_immediately(self) -> None:
@@ -726,6 +831,145 @@ class RunLoopTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(queue_mock.call_count, 2)
+
+
+class MainCheckImportTests(unittest.TestCase):
+    def test_check_validates_and_exits_without_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cfg.yaml"
+            cfg.write_text(
+                "- name: check-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  test: pytest -q\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with patch.object(buildbot, "check_dependencies") as dep_mock:
+                    rc = buildbot.main(["--check", str(cfg)])
+
+        self.assertEqual(rc, 0)
+        dep_mock.assert_not_called()
+        self.assertIn("OK:", output.getvalue())
+
+    def test_import_validates_and_copies_to_user_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot, "check_dependencies") as dep_mock:
+                        rc = buildbot.main(["--import", str(cfg)])
+
+            copied = home / ".config" / "gfff" / "custom.yaml"
+            self.assertTrue(copied.is_file())
+            self.assertEqual(copied.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            dep_mock.assert_not_called()
+            self.assertIn("OK: imported", output.getvalue())
+
+    def test_check_and_import_together_fails(self) -> None:
+        rc = buildbot.main(["--check", "a.yaml", "--import", "b.yaml"])
+        self.assertEqual(rc, 1)
+
+    def test_check_invalid_config_fails_gracefully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "bad.yaml"
+            cfg.write_text("name: invalid\n", encoding="utf-8")
+
+            rc = buildbot.main(["--check", str(cfg)])
+
+        self.assertEqual(rc, 1)
+
+    def test_overwrite_without_import_fails(self) -> None:
+        rc = buildbot.main(["--overwrite"])
+        self.assertEqual(rc, 1)
+
+    def test_import_existing_file_without_overwrite_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg)])
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+
+    def test_import_existing_file_with_overwrite_replaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg), "--overwrite"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
+
+    def test_import_existing_file_with_overwrite_short_alias_replaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            cfg = Path(tmp) / "custom.yaml"
+            cfg.write_text(
+                "- name: import-job\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            target = home / ".config" / "gfff" / "custom.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(["--import", str(cfg), "-w"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

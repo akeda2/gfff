@@ -183,6 +183,29 @@ def parse_bool(value: Any, field: str, job_name: str) -> bool:
     raise ValueError(f"Job '{job_name}' has invalid '{field}': {value}")
 
 
+def parse_command_steps(value: Any, field: str, job_name: str) -> List[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        step = value.strip()
+        return [step] if step else []
+
+    if isinstance(value, list):
+        steps: List[str] = []
+        for idx, item in enumerate(value, start=1):
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"Job '{job_name}' has invalid '{field}' item at position {idx}: {item!r}"
+                )
+            step = item.strip()
+            if step:
+                steps.append(step)
+        return steps
+
+    raise ValueError(f"Job '{job_name}' has invalid '{field}': {value!r}")
+
+
 def parse_at_time(value: Any, job_name: str) -> str:
     at = str(value).strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
@@ -243,6 +266,9 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
+        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
+        pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
+        post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -260,9 +286,9 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "test": test,
                 "interval": interval_s,
                 "at": at_s,
-                "cleanup": str(job.get("cleanup", "")).strip(),
-                "pre_build": str(job.get("pre-build", "")).strip(),
-                "post_build": str(job.get("post-build", "")).strip(),
+                "cleanup_steps": cleanup_steps,
+                "pre_build_steps": pre_build_steps,
+                "post_build_steps": post_build_steps,
                 "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
                 "git_strict": git_strict,
                 "git_pull": git_pull,
@@ -303,16 +329,29 @@ def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
 def generate_build_script(job: Dict[str, Any]) -> str:
     lines = ["set -e", f"cd {shlex.quote(job['path'])}"]
 
-    if job["cleanup"]:
-        lines.append(job["cleanup"])
-    if job["pre_build"]:
-        lines.append(job["pre_build"])
+    cleanup_steps = parse_command_steps(
+        job.get("cleanup_steps", job.get("cleanup", "")),
+        "cleanup",
+        str(job.get("name", "job")),
+    )
+    pre_build_steps = parse_command_steps(
+        job.get("pre_build_steps", job.get("pre_build", "")),
+        "pre-build",
+        str(job.get("name", "job")),
+    )
+    post_build_steps = parse_command_steps(
+        job.get("post_build_steps", job.get("post_build", "")),
+        "post-build",
+        str(job.get("name", "job")),
+    )
+
+    lines.extend(cleanup_steps)
+    lines.extend(pre_build_steps)
     if job.get("test"):
         lines.append(str(job["test"]))
     if job.get("build"):
         lines.append(str(job["build"]))
-    if job["post_build"]:
-        lines.append(job["post_build"])
+    lines.extend(post_build_steps)
 
     return "\n".join(lines)
 
@@ -692,6 +731,20 @@ def run_loop(
         time.sleep(max(1, tick))
 
 
+def filter_jobs_by_name(jobs: List[Dict[str, Any]], job_name: str) -> List[Dict[str, Any]]:
+    target = job_name.strip()
+    if not target:
+        raise ValueError("Job name filter cannot be empty")
+    return [job for job in jobs if str(job.get("name", "")).strip() == target]
+
+
+def validate_config_file(config_path: Path) -> List[Dict[str, Any]]:
+    if not config_path.is_file():
+        raise RuntimeError(f"Config file not found: {config_path}")
+    jobs = normalize_jobs(load_yaml_config(config_path))
+    return jobs
+
+
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run periodic pueue build tasks from gfff.yaml"
@@ -734,6 +787,26 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="Queue runs even when git has no updates (useful with --once)",
     )
     parser.add_argument(
+        "-C",
+        "--check",
+        dest="check_config",
+        default=None,
+        help="Validate a config file and exit",
+    )
+    parser.add_argument(
+        "-I",
+        "--import",
+        dest="import_config",
+        default=None,
+        help="Validate a config file, then copy it into ~/.config/gfff/",
+    )
+    parser.add_argument(
+        "-w",
+        "--overwrite",
+        action="store_true",
+        help="Allow --import to overwrite an existing file with the same name",
+    )
+    parser.add_argument(
         "--no-dev-fallback",
         action="store_true",
         help="Do not include the development repo config in default config discovery",
@@ -746,12 +819,45 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
             "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/gfff.yaml)"
         ),
     )
+    parser.add_argument(
+        "job_name",
+        nargs="?",
+        help="Only run the job with this exact config name",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
+        if args.check_config and args.import_config:
+            raise RuntimeError("Use only one of --check or --import")
+        if args.overwrite and not args.import_config:
+            raise RuntimeError("--overwrite can only be used together with --import")
+
+        if args.check_config:
+            config_path = Path(args.check_config).expanduser().resolve()
+            jobs = validate_config_file(config_path)
+            print(f"OK: {config_path} is valid ({len(jobs)} active job(s))")
+            return 0
+
+        if args.import_config:
+            source_path = Path(args.import_config).expanduser().resolve()
+            jobs = validate_config_file(source_path)
+            target_dir = (Path.home() / USER_CONFIG_PATH.parent).resolve()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / source_path.name
+            if target_path.exists() and not args.overwrite:
+                raise RuntimeError(
+                    f"Target already exists: {target_path}. Use --overwrite to replace it."
+                )
+            shutil.copy2(source_path, target_path)
+            print(
+                f"OK: imported {source_path} to {target_path} "
+                f"({len(jobs)} active job(s))"
+            )
+            return 0
+
         check_dependencies()
         config_paths: List[Path]
         if args.config:
@@ -783,6 +889,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             log_event("INFO", f"using config: {config_path}")
 
         jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
+        if args.job_name:
+            jobs = filter_jobs_by_name(jobs, args.job_name)
+            if not jobs:
+                raise RuntimeError(
+                    f"No active job matched name: {args.job_name}. "
+                    "Config files were loaded in normal discovery order."
+                )
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,

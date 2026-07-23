@@ -43,6 +43,11 @@ Only the build phase is queued in `pueue`:
 `test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
 If a repo is test-only, omit `build` and set only `test`.
 
+`cleanup`, `pre-build`, and `post-build` accept either:
+
+- a single command string
+- a YAML list of commands (run in listed order)
+
 Scheduling supports two modes per active job:
 
 - `interval`: run every N seconds
@@ -74,6 +79,26 @@ Example:
 	test: pytest -q --tb=short
 	build: make
 	manual-install-cmd: sudo make install
+	interval: 3600
+```
+
+Multi-step hook example:
+
+```yaml
+- name: hook-heavy-repo
+	active: true
+	path: ~/dev/hook-heavy-repo
+	cleanup:
+	  - git clean -fdx
+	  - rm -rf .pytest_cache
+	pre-build:
+	  - ./scripts/bootstrap.sh
+	  - ./scripts/generate-config.sh
+	test: pytest -q
+	build: make release
+	post-build:
+	  - ./scripts/publish-artifacts.sh
+	  - ./scripts/notify.sh
 	interval: 3600
 ```
 
@@ -110,8 +135,9 @@ This script will:
 2. install/upgrade the `gfff-buildbot` package (including `PyYAML`) into that venv
 3. create/update `~/.local/bin/gfff-buildbot` as a symlink to the venv command
 4. create/update `~/.local/bin/gb` as a symlink to the short command alias
-5. install/update `~/.config/systemd/user/gfff-buildbot.service`
-6. reload user systemd and enable/start (or restart) the service
+5. create `~/.config/gfff/` if it does not exist
+6. install/update `~/.config/systemd/user/gfff-buildbot.service`
+7. reload user systemd and enable/start (or restart) the service
 
 This avoids `--break-system-packages` on modern Ubuntu and other PEP 668 environments.
 
@@ -193,6 +219,26 @@ gfff-buildbot --dry-run
 
 # Short flag aliases
 gfff-buildbot -n -o -f
+
+# Validate a config file
+gfff-buildbot --check /path/to/configfile.yaml
+gfff-buildbot -C /path/to/configfile.yaml
+
+# Validate and import into ~/.config/gfff/
+gfff-buildbot --import /path/to/configfile.yaml
+gfff-buildbot -I /path/to/configfile.yaml
+
+# Overwrite existing target file during import
+gfff-buildbot --import /path/to/configfile.yaml --overwrite
+gfff-buildbot -I /path/to/configfile.yaml -w
+```
+
+Run only one specific job by exact `name` (config discovery order is unchanged):
+
+```bash
+gb name-of-list-entry
+gb -o name-of-list-entry
+gb -o -f name-of-list-entry
 ```
 
 Short option aliases:
