@@ -21,6 +21,8 @@ from buildbot import (
     normalize_jobs,
     normalize_task_result,
     next_daily_at_timestamp,
+    is_job_mode_eligible,
+    parse_run_mode,
     parse_config_path_from_service,
     parse_bool,
     parse_command_steps,
@@ -189,6 +191,63 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["pre_build_steps"], ["echo prep1", "echo prep2"])
         self.assertEqual(jobs[0]["post_build_steps"], ["echo post1", "echo post2"])
 
+    def test_defaults_run_mode_to_normal(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaults",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(jobs[0]["run_mode"], "normal")
+
+    def test_accepts_manual_and_scheduled_run_modes(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "manual-only",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "run-mode": "manual",
+                },
+                {
+                    "name": "scheduled-only",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "at": "05:00",
+                    "run-mode": "scheduled",
+                },
+            ]
+        )
+
+        self.assertEqual(jobs[0]["run_mode"], "manual")
+        self.assertEqual(jobs[1]["run_mode"], "scheduled")
+
+    def test_rejects_invalid_run_mode(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "invalid",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "run-mode": "nightly",
+                    }
+                ]
+            )
+
+        self.assertIn("invalid 'run-mode'", str(ctx.exception))
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -285,6 +344,21 @@ class PrimitiveFunctionTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             parse_command_steps(["ok", 1], "pre-build", "job")
+
+    def test_parse_run_mode(self) -> None:
+        self.assertEqual(parse_run_mode(None, "job"), "normal")
+        self.assertEqual(parse_run_mode("manual", "job"), "manual")
+        self.assertEqual(parse_run_mode("SCHEDULED", "job"), "scheduled")
+        with self.assertRaises(ValueError):
+            parse_run_mode("bad", "job")
+
+    def test_is_job_mode_eligible(self) -> None:
+        self.assertTrue(is_job_mode_eligible({"run_mode": "normal"}, run_once=True))
+        self.assertTrue(is_job_mode_eligible({"run_mode": "normal"}, run_once=False))
+        self.assertTrue(is_job_mode_eligible({"run_mode": "manual"}, run_once=True))
+        self.assertFalse(is_job_mode_eligible({"run_mode": "manual"}, run_once=False))
+        self.assertFalse(is_job_mode_eligible({"run_mode": "scheduled"}, run_once=True))
+        self.assertTrue(is_job_mode_eligible({"run_mode": "scheduled"}, run_once=False))
 
     def test_next_daily_at_timestamp(self) -> None:
         now = dt.datetime(2026, 1, 2, 4, 30, 0).timestamp()
@@ -831,6 +905,87 @@ class RunLoopTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(queue_mock.call_count, 2)
+
+    def test_once_skips_scheduled_only_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "scheduled-only",
+                "slug": "scheduled-only",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "scheduled",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True) as prep_mock:
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                )
+
+        self.assertEqual(rc, 0)
+        prep_mock.assert_not_called()
+        queue_mock.assert_not_called()
+
+    def test_scheduled_mode_skips_manual_only_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "manual-only",
+                "slug": "manual-only",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "manual",
+                "manual_install_cmd": "",
+            },
+            {
+                "name": "scheduled",
+                "slug": "scheduled",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            },
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                with self.assertRaises(KeyboardInterrupt):
+                                    with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                        run_loop(
+                                            jobs=jobs,
+                                            group_prefix="gfff",
+                                            tick=1,
+                                            dry_run=False,
+                                            run_once=False,
+                                            force_run=False,
+                                        )
+
+        self.assertEqual(queue_mock.call_count, 1)
+        queued_job = queue_mock.call_args[0][0]
+        self.assertEqual(queued_job["name"], "scheduled")
 
 
 class MainCheckImportTests(unittest.TestCase):
