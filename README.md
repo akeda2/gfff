@@ -60,6 +60,12 @@ Useful per-job git options:
 - `git-strict`: when `false`, fetch/pull failures skip that run instead of failing the task
 - `manual-install-cmd`: optional manual install command (for example sudo install steps) that is logged as an explicit action after a successful build task
 
+Optional per-job run mode:
+
+- `run-mode: normal` (default when omitted): run in both scheduler mode and `--once`
+- `run-mode: manual`: run only when invoked manually with `--once`
+- `run-mode: scheduled`: run only in scheduler mode (`at`/`interval` loop), never in `--once`
+
 Logging now includes:
 
 - when no git updates are found for a job
@@ -112,8 +118,31 @@ Daily schedule example:
 	at: 05:00
 ```
 
+Manual-only example (skip normal scheduler loop):
+
+```yaml
+- name: on-demand-rebuild
+	active: true
+	path: ~/dev/my-repo
+	build: make clean all
+	run-mode: manual
+	interval: 3600
+```
+
+Scheduled-only example (never run via `--once`):
+
+```yaml
+- name: pueue-restart
+	active: true
+	path: ~/dev/pueue
+	test: systemctl --user restart pueued.service
+	run-mode: scheduled
+	at: 04:00
+```
+
 At least one of `test` or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
+If `run-mode` is omitted, behavior is unchanged from previous versions.
 
 ### Requirements
 

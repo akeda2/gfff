@@ -23,6 +23,7 @@ USER_CONFIG_PATH = Path(".config/gfff/gfff.yaml")
 DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
+RUN_MODES = {"normal", "manual", "scheduled"}
 
 
 def log_event(level: str, message: str) -> None:
@@ -215,6 +216,29 @@ def parse_at_time(value: Any, job_name: str) -> str:
     return at
 
 
+def parse_run_mode(value: Any, job_name: str) -> str:
+    if value is None:
+        return "normal"
+
+    run_mode = str(value).strip().lower()
+    if run_mode in RUN_MODES:
+        return run_mode
+
+    allowed = ", ".join(sorted(RUN_MODES))
+    raise ValueError(
+        f"Job '{job_name}' has invalid 'run-mode': {value!r}. Expected one of: {allowed}"
+    )
+
+
+def is_job_mode_eligible(job: Dict[str, Any], run_once: bool) -> bool:
+    run_mode = str(job.get("run_mode", "normal"))
+    if run_mode == "manual":
+        return run_once
+    if run_mode == "scheduled":
+        return not run_once
+    return True
+
+
 def next_daily_at_timestamp(at_time: str, from_ts: float) -> float:
     hour, minute = map(int, at_time.split(":"))
     now = dt.datetime.fromtimestamp(from_ts)
@@ -264,6 +288,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             at_s = parse_at_time(at, name)
 
         git_strict = parse_bool(job.get("git-strict", True), "git-strict", name)
+        run_mode = parse_run_mode(job.get("run-mode"), name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
         cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
@@ -286,6 +311,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "test": test,
                 "interval": interval_s,
                 "at": at_s,
+                "run_mode": run_mode,
                 "cleanup_steps": cleanup_steps,
                 "pre_build_steps": pre_build_steps,
                 "post_build_steps": post_build_steps,
@@ -660,8 +686,12 @@ def run_loop(
     run_once: bool,
     force_run: bool,
 ) -> int:
-    if not jobs:
-        print("No active jobs found.")
+    mode_eligible_jobs = [job for job in jobs if is_job_mode_eligible(job, run_once=run_once)]
+    if not mode_eligible_jobs:
+        if run_once:
+            print("No active jobs found for --once run mode.")
+        else:
+            print("No active jobs found for scheduled run mode.")
         return 0
 
     shared_group = group_prefix
@@ -672,7 +702,7 @@ def run_loop(
 
     now = time.time()
     next_runs: Dict[str, float] = {}
-    for job in jobs:
+    for job in mode_eligible_jobs:
         if run_once and force_run:
             next_runs[job["slug"]] = now
         elif job.get("at"):
@@ -687,7 +717,7 @@ def run_loop(
             log_finished_task_outcomes(status_data, tracked_tasks)
 
         loop_now = time.time()
-        for job in jobs:
+        for job in mode_eligible_jobs:
             if loop_now < next_runs[job["slug"]]:
                 continue
 
