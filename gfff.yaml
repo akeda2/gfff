@@ -14,7 +14,7 @@
   path: ~/dev/yt-dlp
   git-remote-ref: origin/master
   git-pull: git pull origin master --ff-only
-  build: make
+  build: pipx install --force .
   manual-install-cmd: sudo make install
   interval: 3600
 - name: btop
