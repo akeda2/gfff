@@ -923,6 +923,14 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.force)
         self.assertEqual(args.job_name, "my-job")
 
+    def test_accepts_reload_config_seconds(self) -> None:
+        args = parse_args(["--reload-config-seconds", "120"])
+        self.assertEqual(args.reload_config_seconds, 120)
+
+    def test_default_reload_config_seconds(self) -> None:
+        args = parse_args([])
+        self.assertEqual(args.reload_config_seconds, 60)
+
 
 class JobNameFilterTests(unittest.TestCase):
     def test_filters_to_exact_name(self) -> None:
@@ -1095,6 +1103,53 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(queue_mock.call_count, 1)
         queued_job = queue_mock.call_args[0][0]
         self.assertEqual(queued_job["name"], "scheduled")
+
+    def test_scheduler_reloads_config_periodically(self) -> None:
+        jobs = [
+            {
+                "name": "initial",
+                "slug": "initial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+        config_paths = [Path("/tmp/reload.yaml")]
+        reloaded_raw_jobs = [
+            {
+                "name": "reloaded",
+                "active": True,
+                "path": "~/repo",
+                "build": "make",
+                "interval": 60,
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=reloaded_raw_jobs) as merge_mock:
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                                with patch.object(buildbot.time, "time", side_effect=[0, 61]):
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                            run_loop(
+                                                jobs=jobs,
+                                                group_prefix="gfff",
+                                                tick=1,
+                                                dry_run=False,
+                                                run_once=False,
+                                                force_run=False,
+                                                config_paths=config_paths,
+                                                reload_config_seconds=60,
+                                            )
+
+        merge_mock.assert_called_once_with(config_paths)
 
 
 class MainCheckImportTests(unittest.TestCase):

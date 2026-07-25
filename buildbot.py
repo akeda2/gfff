@@ -750,7 +750,13 @@ def run_loop(
     dry_run: bool,
     run_once: bool,
     force_run: bool,
+    config_paths: Optional[List[Path]] = None,
+    reload_config_seconds: int = 60,
+    job_name_filter: Optional[str] = None,
 ) -> int:
+    if reload_config_seconds < 0:
+        raise ValueError("reload-config-seconds must be >= 0")
+
     mode_eligible_jobs = [job for job in jobs if is_job_mode_eligible(job, run_once=run_once)]
     if not mode_eligible_jobs:
         if run_once:
@@ -775,13 +781,49 @@ def run_loop(
         else:
             next_runs[job["slug"]] = now
     tracked_tasks: Dict[int, Dict[str, str]] = {}
+    next_config_reload: Optional[float] = None
+    if config_paths and not run_once and reload_config_seconds > 0:
+        next_config_reload = now + reload_config_seconds
 
     while True:
+        loop_now = time.time()
         if not dry_run:
             status_data = get_pueue_status()
             log_finished_task_outcomes(status_data, tracked_tasks)
 
-        loop_now = time.time()
+        if next_config_reload is not None and loop_now >= next_config_reload:
+            try:
+                reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
+                if job_name_filter:
+                    reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
+
+                mode_eligible_jobs = [
+                    job for job in reloaded_jobs if is_job_mode_eligible(job, run_once=run_once)
+                ]
+                refreshed_next_runs: Dict[str, float] = {}
+                for job in mode_eligible_jobs:
+                    slug = str(job["slug"])
+                    if slug in next_runs:
+                        refreshed_next_runs[slug] = next_runs[slug]
+                    elif job.get("at"):
+                        refreshed_next_runs[slug] = next_daily_at_timestamp(
+                            str(job["at"]), loop_now
+                        )
+                    else:
+                        refreshed_next_runs[slug] = loop_now
+                next_runs = refreshed_next_runs
+                log_event(
+                    "INFO",
+                    f"reloaded config: {len(mode_eligible_jobs)} eligible job(s)",
+                )
+            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+                log_event(
+                    "ERROR",
+                    f"config reload failed: {exc}; keeping previous active jobs",
+                )
+
+            next_config_reload = loop_now + reload_config_seconds
+
         for job in mode_eligible_jobs:
             if loop_now < next_runs[job["slug"]]:
                 continue
@@ -915,6 +957,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reload-config-seconds",
+        type=int,
+        default=60,
+        help=(
+            "Reload merged config files every N seconds in scheduler mode (default: 60, 0 disables)"
+        ),
+    )
+    parser.add_argument(
         "job_name",
         nargs="?",
         help="Only run the job with this exact config name",
@@ -929,6 +979,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise RuntimeError("Use only one of --check or --import")
         if args.overwrite and not args.import_config:
             raise RuntimeError("--overwrite can only be used together with --import")
+        if args.reload_config_seconds < 0:
+            raise RuntimeError("--reload-config-seconds must be >= 0")
 
         if args.check_config:
             config_path = Path(args.check_config).expanduser().resolve()
@@ -1003,6 +1055,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             dry_run=args.dry_run,
             run_once=args.once,
             force_run=args.force,
+            config_paths=config_paths,
+            reload_config_seconds=args.reload_config_seconds,
+            job_name_filter=args.job_name,
         )
     except KeyboardInterrupt:
         print("Interrupted.")

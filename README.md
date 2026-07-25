@@ -235,6 +235,10 @@ The shipped user service intentionally starts in `%h` (home) and does not pass
 `--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`
 remains only a fallback source.
 
+In scheduler mode, merged config files are reloaded periodically (default every 60 seconds)
+so changes are picked up without restarting the service. Use
+`--reload-config-seconds N` to change this interval, or `0` to disable periodic reload.
+
 Important behavior:
 
 - If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
