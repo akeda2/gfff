@@ -333,6 +333,7 @@ class PrimitiveFunctionTests(unittest.TestCase):
 
     def test_parse_at_time(self) -> None:
         self.assertEqual(parse_at_time("05:00", "job"), "05:00")
+        self.assertEqual(parse_at_time(685, "job"), "11:25")
         with self.assertRaises(ValueError):
             parse_at_time("5:00", "job")
         with self.assertRaises(ValueError):

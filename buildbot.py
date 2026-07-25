@@ -246,6 +246,15 @@ def parse_command_steps(value: Any, field: str, job_name: str) -> List[str]:
 
 
 def parse_at_time(value: Any, job_name: str) -> str:
+    if isinstance(value, int):
+        if 0 <= value <= (23 * 60 + 59):
+            hour = value // 60
+            minute = value % 60
+            return f"{hour:02d}:{minute:02d}"
+        raise ValueError(
+            f"Job '{job_name}' has invalid 'at': {value}. Expected HH:MM (24-hour)."
+        )
+
     at = str(value).strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
         raise ValueError(

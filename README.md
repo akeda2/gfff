@@ -57,6 +57,9 @@ Scheduling supports two modes per active job:
 - `interval`: run every N seconds
 - `at`: run once daily at a fixed time in local time, for example `05:00`
 
+Tip: quote `at` values in YAML (for example `at: "11:25"`) to avoid YAML parser
+time/sexagesimal coercion on some systems.
+
 Useful per-job git options:
 
 - `git-pull`: custom pull command per job, for example `git pull origin main --ff-only`
