@@ -24,6 +24,44 @@ DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
+_PUEUE_CMD_CACHE: Optional[str] = None
+
+
+def resolve_executable(binary: str) -> Optional[str]:
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    home = Path.home()
+    fallback_paths = [
+        home / ".cargo" / "bin" / binary,
+        home / ".local" / "bin" / binary,
+        Path("/usr/local/bin") / binary,
+        Path("/usr/bin") / binary,
+    ]
+    for candidate in fallback_paths:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return None
+
+
+def get_pueue_cmd() -> str:
+    global _PUEUE_CMD_CACHE
+    if _PUEUE_CMD_CACHE:
+        return _PUEUE_CMD_CACHE
+
+    resolved = resolve_executable("pueue")
+    if resolved is None:
+        home = Path.home()
+        raise RuntimeError(
+            "pueue is not installed or not in PATH. "
+            "Tried PATH and fallback locations: "
+            f"{home / '.cargo/bin/pueue'}, {home / '.local/bin/pueue'}, /usr/local/bin/pueue, /usr/bin/pueue"
+        )
+
+    _PUEUE_CMD_CACHE = resolved
+    return resolved
 
 
 def log_event(level: str, message: str) -> None:
@@ -326,7 +364,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def ensure_pueue_group(group: str, dry_run: bool) -> None:
-    cmd = ["pueue", "group", "add", group]
+    cmd = [get_pueue_cmd(), "group", "add", group]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -342,7 +380,7 @@ def ensure_pueue_group(group: str, dry_run: bool) -> None:
 
 
 def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
-    cmd = ["pueue", "parallel", "-g", group, str(parallelism)]
+    cmd = [get_pueue_cmd(), "parallel", "-g", group, str(parallelism)]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -545,7 +583,7 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
 
 def get_pueue_status() -> Dict[str, Any]:
     result = subprocess.run(
-        ["pueue", "status", "-j"], capture_output=True, text=True, check=False
+        [get_pueue_cmd(), "status", "-j"], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
@@ -598,7 +636,7 @@ def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
     cmd = [
-        "pueue",
+        get_pueue_cmd(),
         "add",
         "-g",
         group,
@@ -679,8 +717,8 @@ def log_finished_task_outcomes(
 
 
 def check_dependencies() -> None:
-    if shutil.which("pueue") is None:
-        raise RuntimeError("pueue is not installed or not in PATH")
+    pueue_cmd = get_pueue_cmd()
+    log_event("INFO", f"using pueue executable: {pueue_cmd}")
     if shutil.which("git") is None:
         raise RuntimeError("git is not installed or not in PATH")
 

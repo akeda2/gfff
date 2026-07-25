@@ -9,6 +9,7 @@ WorkingDirectory=%h/dev/gfff
 ExecStart=%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot --config %h/dev/gfff/gfff.yaml --group-prefix gfff --tick 5
 Restart=on-failure
 RestartSec=10
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

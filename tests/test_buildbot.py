@@ -10,6 +10,7 @@ from unittest.mock import patch
 import buildbot
 from buildbot import (
     CONFIG_FILENAME,
+    check_dependencies,
     discover_default_config_paths,
     extract_done_result,
     extract_task_state,
@@ -30,6 +31,7 @@ from buildbot import (
     parse_args,
     prepare_repo_for_build,
     queue_job,
+    resolve_executable,
     run_loop,
     sanitize_name,
 )
@@ -370,6 +372,57 @@ class PrimitiveFunctionTests(unittest.TestCase):
         next_after_ts = next_daily_at_timestamp("05:00", now_after)
         expected_next_day = dt.datetime(2026, 1, 3, 5, 0, 0).timestamp()
         self.assertEqual(next_after_ts, expected_next_day)
+
+    def test_resolve_executable_uses_fallback_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", return_value=None):
+                        resolved = resolve_executable("pueue")
+
+            self.assertEqual(resolved, str(pueue))
+
+    def test_check_dependencies_raises_with_fallback_paths_in_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", return_value=None):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            check_dependencies()
+
+        self.assertIn("fallback locations", str(ctx.exception))
+
+    def test_check_dependencies_logs_resolved_pueue_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            def which_side_effect(binary: str):
+                if binary == "pueue":
+                    return None
+                if binary == "git":
+                    return "/usr/bin/git"
+                return None
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", side_effect=which_side_effect):
+                        with patch.object(buildbot, "log_event") as log_mock:
+                            check_dependencies()
+
+        log_mock.assert_any_call("INFO", f"using pueue executable: {str(pueue)}")
 
 
 class LoadYamlConfigTests(unittest.TestCase):

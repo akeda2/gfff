@@ -154,6 +154,18 @@ If `run-mode` is omitted, behavior is unchanged from previous versions.
 - `git`
 - Python 3
 
+If `pueue` works in your shell but the user service logs `pueue is not installed or not in PATH`,
+the service environment is usually missing user-level PATH entries.
+This project now checks common fallback locations as well:
+
+- `~/.cargo/bin/pueue`
+- `~/.local/bin/pueue`
+- `/usr/local/bin/pueue`
+- `/usr/bin/pueue`
+
+The provided [gfff-buildbot.service](gfff-buildbot.service) also sets an explicit PATH
+that includes `~/.cargo/bin` and `~/.local/bin`.
+
 ### Install Buildbot (Package + Service)
 
 Use `install-buildbot.sh` to install or upgrade the Python package and install/update the user service in one step:
