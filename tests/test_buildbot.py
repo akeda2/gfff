@@ -20,6 +20,7 @@ from buildbot import (
     log_finished_task_outcomes,
     merge_jobs_from_configs,
     normalize_jobs,
+    next_run_for_daily_job,
     normalize_task_result,
     next_daily_at_timestamp,
     is_job_mode_eligible,
@@ -373,6 +374,17 @@ class PrimitiveFunctionTests(unittest.TestCase):
         next_after_ts = next_daily_at_timestamp("05:00", now_after)
         expected_next_day = dt.datetime(2026, 1, 3, 5, 0, 0).timestamp()
         self.assertEqual(next_after_ts, expected_next_day)
+
+    def test_next_run_for_daily_job_catches_up_within_window(self) -> None:
+        now = dt.datetime(2026, 1, 2, 11, 58, 42).timestamp()
+        next_ts = next_run_for_daily_job("11:58", now, catch_up_window_s=60)
+        self.assertEqual(next_ts, now)
+
+    def test_next_run_for_daily_job_outside_window_goes_to_next_day(self) -> None:
+        now = dt.datetime(2026, 1, 2, 11, 58, 42).timestamp()
+        next_ts = next_run_for_daily_job("11:58", now, catch_up_window_s=30)
+        expected = dt.datetime(2026, 1, 3, 11, 58, 0).timestamp()
+        self.assertEqual(next_ts, expected)
 
     def test_resolve_executable_uses_fallback_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1151,6 +1163,41 @@ class RunLoopTests(unittest.TestCase):
 
         merge_mock.assert_called_once_with(config_paths)
 
+    def test_scheduler_logs_next_run_for_at_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "daily",
+                "slug": "daily",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "11:58",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                            with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                with patch.object(buildbot, "log_event") as log_mock:
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        run_loop(
+                                            jobs=jobs,
+                                            group_prefix="gfff",
+                                            tick=1,
+                                            dry_run=False,
+                                            run_once=False,
+                                            force_run=False,
+                                        )
+
+        messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
+        self.assertTrue(any("startup schedule next-run [daily] at 11:58" in msg for msg in messages))
+
 
 class MainCheckImportTests(unittest.TestCase):
     def test_main_logs_config_discovery_summary_line(self) -> None:
@@ -1168,6 +1215,10 @@ class MainCheckImportTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn(
             "config discovery order: /tmp/a.yaml, /tmp/b.yaml",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "startup currently loaded configs: /tmp/a.yaml, /tmp/b.yaml",
             output.getvalue(),
         )
 

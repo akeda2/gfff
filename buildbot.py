@@ -69,6 +69,32 @@ def log_event(level: str, message: str) -> None:
     print(f"{timestamp} {level} {message}")
 
 
+def format_local_timestamp(ts: float) -> str:
+    return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_loaded_configs(config_paths: Iterable[Path], context: str) -> None:
+    paths_text = ", ".join(str(path) for path in config_paths)
+    log_event("INFO", f"{context} currently loaded configs: {paths_text}")
+
+
+def log_at_job_next_runs(
+    jobs: Iterable[Dict[str, Any]], next_runs: Dict[str, float], context: str
+) -> None:
+    for job in jobs:
+        at_value = str(job.get("at", "")).strip()
+        if not at_value:
+            continue
+        slug = str(job.get("slug", ""))
+        if slug not in next_runs:
+            continue
+        run_ts = next_runs[slug]
+        log_event(
+            "INFO",
+            f"{context} next-run [{job.get('name', slug)}] at {at_value} -> {format_local_timestamp(run_ts)}",
+        )
+
+
 def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
     try:
         import yaml  # type: ignore
@@ -304,6 +330,27 @@ def next_daily_at_timestamp(at_time: str, from_ts: float) -> float:
     if candidate.timestamp() <= from_ts:
         candidate += dt.timedelta(days=1)
     return candidate.timestamp()
+
+
+def next_run_for_daily_job(
+    at_time: str, from_ts: float, catch_up_window_s: int = 0
+) -> float:
+    """Return next run for a daily job, optionally catching up shortly after target time.
+
+    When catch_up_window_s > 0 and the process evaluates shortly after today's target
+    HH:MM, we schedule an immediate run instead of deferring to tomorrow.
+    """
+
+    next_ts = next_daily_at_timestamp(at_time, from_ts)
+    if catch_up_window_s <= 0:
+        return next_ts
+
+    hour, minute = map(int, at_time.split(":"))
+    now = dt.datetime.fromtimestamp(from_ts)
+    today_target = now.replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp()
+    if today_target <= from_ts and (from_ts - today_target) <= catch_up_window_s:
+        return from_ts
+    return next_ts
 
 
 def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -773,13 +820,17 @@ def run_loop(
 
     now = time.time()
     next_runs: Dict[str, float] = {}
+    catch_up_window_s = max(0, reload_config_seconds)
     for job in mode_eligible_jobs:
         if run_once and force_run:
             next_runs[job["slug"]] = now
         elif job.get("at"):
-            next_runs[job["slug"]] = next_daily_at_timestamp(str(job["at"]), now)
+            next_runs[job["slug"]] = next_run_for_daily_job(
+                str(job["at"]), now, catch_up_window_s=catch_up_window_s
+            )
         else:
             next_runs[job["slug"]] = now
+    log_at_job_next_runs(mode_eligible_jobs, next_runs, context="startup schedule")
     tracked_tasks: Dict[int, Dict[str, str]] = {}
     next_config_reload: Optional[float] = None
     if config_paths and not run_once and reload_config_seconds > 0:
@@ -793,6 +844,7 @@ def run_loop(
 
         if next_config_reload is not None and loop_now >= next_config_reload:
             try:
+                log_loaded_configs(config_paths, context="reload")
                 reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
                 if job_name_filter:
                     reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
@@ -806,8 +858,10 @@ def run_loop(
                     if slug in next_runs:
                         refreshed_next_runs[slug] = next_runs[slug]
                     elif job.get("at"):
-                        refreshed_next_runs[slug] = next_daily_at_timestamp(
-                            str(job["at"]), loop_now
+                        refreshed_next_runs[slug] = next_run_for_daily_job(
+                            str(job["at"]),
+                            loop_now,
+                            catch_up_window_s=max(0, reload_config_seconds),
                         )
                     else:
                         refreshed_next_runs[slug] = loop_now
@@ -816,6 +870,7 @@ def run_loop(
                     "INFO",
                     f"reloaded config: {len(mode_eligible_jobs)} eligible job(s)",
                 )
+                log_at_job_next_runs(mode_eligible_jobs, next_runs, context="reload schedule")
             except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
                 log_event(
                     "ERROR",
@@ -1036,6 +1091,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "INFO",
             "config discovery order: " + ", ".join(str(path) for path in config_paths),
         )
+        log_loaded_configs(config_paths, context="startup")
 
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")

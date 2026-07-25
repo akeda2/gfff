@@ -239,6 +239,10 @@ In scheduler mode, merged config files are reloaded periodically (default every 
 so changes are picked up without restarting the service. Use
 `--reload-config-seconds N` to change this interval, or `0` to disable periodic reload.
 
+For `at: HH:MM` jobs, the scheduler applies a small catch-up window equal to
+`reload-config-seconds`: if the job is first seen shortly after today's target minute,
+it runs immediately instead of waiting until tomorrow.
+
 Important behavior:
 
 - If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
