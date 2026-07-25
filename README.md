@@ -32,6 +32,10 @@ Before queueing a build, the internal scheduler process does:
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
 3. if changed: run configured `git-pull` (default `git pull --ff-only`)
 
+Exception: jobs configured with both `run-mode: scheduled` and `at` are treated
+as clock-driven actions and are queued at the configured time without git update
+checks.
+
 Only the build phase is queued in `pueue`:
 
 1. optional `cleanup`
@@ -52,6 +56,9 @@ Scheduling supports two modes per active job:
 
 - `interval`: run every N seconds
 - `at`: run once daily at a fixed time in local time, for example `05:00`
+
+Tip: quote `at` values in YAML (for example `at: "11:25"`) to avoid YAML parser
+time/sexagesimal coercion on some systems.
 
 Useful per-job git options:
 
@@ -150,6 +157,18 @@ If `run-mode` is omitted, behavior is unchanged from previous versions.
 - `git`
 - Python 3
 
+If `pueue` works in your shell but the user service logs `pueue is not installed or not in PATH`,
+the service environment is usually missing user-level PATH entries.
+This project now checks common fallback locations as well:
+
+- `~/.cargo/bin/pueue`
+- `~/.local/bin/pueue`
+- `/usr/local/bin/pueue`
+- `/usr/bin/pueue`
+
+The provided [gfff-buildbot.service](gfff-buildbot.service) also sets an explicit PATH
+that includes `~/.cargo/bin` and `~/.local/bin`.
+
 ### Install Buildbot (Package + Service)
 
 Use `install-buildbot.sh` to install or upgrade the Python package and install/update the user service in one step:
@@ -211,6 +230,18 @@ If `--config` is not provided, `gfff-buildbot` searches and merges configs in th
 	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
 3. development fallback config from user service `ExecStart --config` (if available)
 4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
+
+The shipped user service intentionally starts in `%h` (home) and does not pass
+`--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`
+remains only a fallback source.
+
+In scheduler mode, merged config files are reloaded periodically (default every 60 seconds)
+so changes are picked up without restarting the service. Use
+`--reload-config-seconds N` to change this interval, or `0` to disable periodic reload.
+
+For `at: HH:MM` jobs, the scheduler applies a small catch-up window equal to
+`reload-config-seconds`: if the job is first seen shortly after today's target minute,
+it runs immediately instead of waiting until tomorrow.
 
 Important behavior:
 

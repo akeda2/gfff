@@ -24,11 +24,75 @@ DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
+_PUEUE_CMD_CACHE: Optional[str] = None
+
+
+def resolve_executable(binary: str) -> Optional[str]:
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    home = Path.home()
+    fallback_paths = [
+        home / ".cargo" / "bin" / binary,
+        home / ".local" / "bin" / binary,
+        Path("/usr/local/bin") / binary,
+        Path("/usr/bin") / binary,
+    ]
+    for candidate in fallback_paths:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return None
+
+
+def get_pueue_cmd() -> str:
+    global _PUEUE_CMD_CACHE
+    if _PUEUE_CMD_CACHE:
+        return _PUEUE_CMD_CACHE
+
+    resolved = resolve_executable("pueue")
+    if resolved is None:
+        home = Path.home()
+        raise RuntimeError(
+            "pueue is not installed or not in PATH. "
+            "Tried PATH and fallback locations: "
+            f"{home / '.cargo/bin/pueue'}, {home / '.local/bin/pueue'}, /usr/local/bin/pueue, /usr/bin/pueue"
+        )
+
+    _PUEUE_CMD_CACHE = resolved
+    return resolved
 
 
 def log_event(level: str, message: str) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{timestamp} {level} {message}")
+
+
+def format_local_timestamp(ts: float) -> str:
+    return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_loaded_configs(config_paths: Iterable[Path], context: str) -> None:
+    paths_text = ", ".join(str(path) for path in config_paths)
+    log_event("INFO", f"{context} currently loaded configs: {paths_text}")
+
+
+def log_at_job_next_runs(
+    jobs: Iterable[Dict[str, Any]], next_runs: Dict[str, float], context: str
+) -> None:
+    for job in jobs:
+        at_value = str(job.get("at", "")).strip()
+        if not at_value:
+            continue
+        slug = str(job.get("slug", ""))
+        if slug not in next_runs:
+            continue
+        run_ts = next_runs[slug]
+        log_event(
+            "INFO",
+            f"{context} next-run [{job.get('name', slug)}] at {at_value} -> {format_local_timestamp(run_ts)}",
+        )
 
 
 def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
@@ -40,7 +104,18 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
         ) from exc
 
     raw = config_path.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        else:
+            location = ""
+        problem = getattr(exc, "problem", None)
+        detail = str(problem).strip() if problem else str(exc).strip()
+        raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
+
     if not isinstance(data, list):
         raise ValueError(f"Expected a list of jobs in {config_path}")
 
@@ -208,6 +283,15 @@ def parse_command_steps(value: Any, field: str, job_name: str) -> List[str]:
 
 
 def parse_at_time(value: Any, job_name: str) -> str:
+    if isinstance(value, int):
+        if 0 <= value <= (23 * 60 + 59):
+            hour = value // 60
+            minute = value % 60
+            return f"{hour:02d}:{minute:02d}"
+        raise ValueError(
+            f"Job '{job_name}' has invalid 'at': {value}. Expected HH:MM (24-hour)."
+        )
+
     at = str(value).strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
         raise ValueError(
@@ -246,6 +330,27 @@ def next_daily_at_timestamp(at_time: str, from_ts: float) -> float:
     if candidate.timestamp() <= from_ts:
         candidate += dt.timedelta(days=1)
     return candidate.timestamp()
+
+
+def next_run_for_daily_job(
+    at_time: str, from_ts: float, catch_up_window_s: int = 0
+) -> float:
+    """Return next run for a daily job, optionally catching up shortly after target time.
+
+    When catch_up_window_s > 0 and the process evaluates shortly after today's target
+    HH:MM, we schedule an immediate run instead of deferring to tomorrow.
+    """
+
+    next_ts = next_daily_at_timestamp(at_time, from_ts)
+    if catch_up_window_s <= 0:
+        return next_ts
+
+    hour, minute = map(int, at_time.split(":"))
+    now = dt.datetime.fromtimestamp(from_ts)
+    today_target = now.replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp()
+    if today_target <= from_ts and (from_ts - today_target) <= catch_up_window_s:
+        return from_ts
+    return next_ts
 
 
 def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -326,7 +431,7 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def ensure_pueue_group(group: str, dry_run: bool) -> None:
-    cmd = ["pueue", "group", "add", group]
+    cmd = [get_pueue_cmd(), "group", "add", group]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -342,7 +447,7 @@ def ensure_pueue_group(group: str, dry_run: bool) -> None:
 
 
 def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
-    cmd = ["pueue", "parallel", "-g", group, str(parallelism)]
+    cmd = [get_pueue_cmd(), "parallel", "-g", group, str(parallelism)]
     if dry_run:
         print("DRY RUN:", " ".join(shlex.quote(p) for p in cmd))
         return
@@ -402,6 +507,8 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
     strict = bool(job.get("git_strict", True))
     git_pull = str(job.get("git_pull", "git pull --ff-only"))
     git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
+    run_mode = str(job.get("run_mode", "normal"))
+    has_daily_schedule = bool(str(job.get("at", "")).strip())
 
     repo_path = Path(str(job["path"]))
     if not repo_path.is_dir():
@@ -410,6 +517,11 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
 
     if force_run:
         log_event("INFO", f"force {label}: skipping git update checks")
+        return True
+
+    if run_mode == "scheduled" and has_daily_schedule:
+        # Daily scheduled jobs are time-driven actions and should not depend on git changes.
+        log_event("INFO", f"{label} scheduled daily job: skipping git update checks")
         return True
 
     if dry_run:
@@ -538,7 +650,7 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
 
 def get_pueue_status() -> Dict[str, Any]:
     result = subprocess.run(
-        ["pueue", "status", "-j"], capture_output=True, text=True, check=False
+        [get_pueue_cmd(), "status", "-j"], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
@@ -591,7 +703,7 @@ def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
 def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
     script = generate_build_script(job)
     cmd = [
-        "pueue",
+        get_pueue_cmd(),
         "add",
         "-g",
         group,
@@ -672,8 +784,8 @@ def log_finished_task_outcomes(
 
 
 def check_dependencies() -> None:
-    if shutil.which("pueue") is None:
-        raise RuntimeError("pueue is not installed or not in PATH")
+    pueue_cmd = get_pueue_cmd()
+    log_event("INFO", f"using pueue executable: {pueue_cmd}")
     if shutil.which("git") is None:
         raise RuntimeError("git is not installed or not in PATH")
 
@@ -685,7 +797,13 @@ def run_loop(
     dry_run: bool,
     run_once: bool,
     force_run: bool,
+    config_paths: Optional[List[Path]] = None,
+    reload_config_seconds: int = 60,
+    job_name_filter: Optional[str] = None,
 ) -> int:
+    if reload_config_seconds < 0:
+        raise ValueError("reload-config-seconds must be >= 0")
+
     mode_eligible_jobs = [job for job in jobs if is_job_mode_eligible(job, run_once=run_once)]
     if not mode_eligible_jobs:
         if run_once:
@@ -702,21 +820,77 @@ def run_loop(
 
     now = time.time()
     next_runs: Dict[str, float] = {}
+    catch_up_window_s = max(0, reload_config_seconds)
     for job in mode_eligible_jobs:
         if run_once and force_run:
             next_runs[job["slug"]] = now
         elif job.get("at"):
-            next_runs[job["slug"]] = next_daily_at_timestamp(str(job["at"]), now)
+            next_runs[job["slug"]] = next_run_for_daily_job(
+                str(job["at"]), now, catch_up_window_s=catch_up_window_s
+            )
         else:
             next_runs[job["slug"]] = now
+    log_at_job_next_runs(mode_eligible_jobs, next_runs, context="startup schedule")
     tracked_tasks: Dict[int, Dict[str, str]] = {}
+    next_config_reload: Optional[float] = None
+    if config_paths and not run_once and reload_config_seconds > 0:
+        next_config_reload = now + reload_config_seconds
 
     while True:
+        loop_now = time.time()
         if not dry_run:
             status_data = get_pueue_status()
             log_finished_task_outcomes(status_data, tracked_tasks)
 
-        loop_now = time.time()
+        if next_config_reload is not None and loop_now >= next_config_reload:
+            try:
+                log_loaded_configs(config_paths, context="reload")
+                previous_jobs_by_slug = {
+                    str(job.get("slug", "")): job for job in mode_eligible_jobs
+                }
+                reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
+                if job_name_filter:
+                    reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
+
+                mode_eligible_jobs = [
+                    job for job in reloaded_jobs if is_job_mode_eligible(job, run_once=run_once)
+                ]
+                refreshed_next_runs: Dict[str, float] = {}
+                for job in mode_eligible_jobs:
+                    slug = str(job["slug"])
+                    previous_job = previous_jobs_by_slug.get(slug)
+                    schedule_unchanged = (
+                        previous_job is not None
+                        and str(previous_job.get("at", "")) == str(job.get("at", ""))
+                        and previous_job.get("interval") == job.get("interval")
+                        and str(previous_job.get("run_mode", "normal"))
+                        == str(job.get("run_mode", "normal"))
+                    )
+
+                    if schedule_unchanged and slug in next_runs:
+                        refreshed_next_runs[slug] = next_runs[slug]
+                    elif job.get("at"):
+                        refreshed_next_runs[slug] = next_run_for_daily_job(
+                            str(job["at"]),
+                            loop_now,
+                            catch_up_window_s=max(0, reload_config_seconds),
+                        )
+                    else:
+                        refreshed_next_runs[slug] = loop_now
+                next_runs = refreshed_next_runs
+                log_event(
+                    "INFO",
+                    f"reloaded config: {len(mode_eligible_jobs)} eligible job(s)",
+                )
+                log_at_job_next_runs(mode_eligible_jobs, next_runs, context="reload schedule")
+            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+                log_event(
+                    "ERROR",
+                    f"config reload failed: {exc}; keeping previous active jobs",
+                )
+
+            next_config_reload = loop_now + reload_config_seconds
+
         for job in mode_eligible_jobs:
             if loop_now < next_runs[job["slug"]]:
                 continue
@@ -850,6 +1024,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reload-config-seconds",
+        type=int,
+        default=60,
+        help=(
+            "Reload merged config files every N seconds in scheduler mode (default: 60, 0 disables)"
+        ),
+    )
+    parser.add_argument(
         "job_name",
         nargs="?",
         help="Only run the job with this exact config name",
@@ -864,6 +1046,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise RuntimeError("Use only one of --check or --import")
         if args.overwrite and not args.import_config:
             raise RuntimeError("--overwrite can only be used together with --import")
+        if args.reload_config_seconds < 0:
+            raise RuntimeError("--reload-config-seconds must be >= 0")
 
         if args.check_config:
             config_path = Path(args.check_config).expanduser().resolve()
@@ -915,6 +1099,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                 )
 
+        log_event(
+            "INFO",
+            "config discovery order: " + ", ".join(str(path) for path in config_paths),
+        )
+        log_loaded_configs(config_paths, context="startup")
+
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")
 
@@ -933,6 +1123,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             dry_run=args.dry_run,
             run_once=args.once,
             force_run=args.force,
+            config_paths=config_paths,
+            reload_config_seconds=args.reload_config_seconds,
+            job_name_filter=args.job_name,
         )
     except KeyboardInterrupt:
         print("Interrupted.")

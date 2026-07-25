@@ -10,6 +10,7 @@ from unittest.mock import patch
 import buildbot
 from buildbot import (
     CONFIG_FILENAME,
+    check_dependencies,
     discover_default_config_paths,
     extract_done_result,
     extract_task_state,
@@ -19,6 +20,7 @@ from buildbot import (
     log_finished_task_outcomes,
     merge_jobs_from_configs,
     normalize_jobs,
+    next_run_for_daily_job,
     normalize_task_result,
     next_daily_at_timestamp,
     is_job_mode_eligible,
@@ -30,6 +32,7 @@ from buildbot import (
     parse_args,
     prepare_repo_for_build,
     queue_job,
+    resolve_executable,
     run_loop,
     sanitize_name,
 )
@@ -331,6 +334,7 @@ class PrimitiveFunctionTests(unittest.TestCase):
 
     def test_parse_at_time(self) -> None:
         self.assertEqual(parse_at_time("05:00", "job"), "05:00")
+        self.assertEqual(parse_at_time(685, "job"), "11:25")
         with self.assertRaises(ValueError):
             parse_at_time("5:00", "job")
         with self.assertRaises(ValueError):
@@ -371,6 +375,68 @@ class PrimitiveFunctionTests(unittest.TestCase):
         expected_next_day = dt.datetime(2026, 1, 3, 5, 0, 0).timestamp()
         self.assertEqual(next_after_ts, expected_next_day)
 
+    def test_next_run_for_daily_job_catches_up_within_window(self) -> None:
+        now = dt.datetime(2026, 1, 2, 11, 58, 42).timestamp()
+        next_ts = next_run_for_daily_job("11:58", now, catch_up_window_s=60)
+        self.assertEqual(next_ts, now)
+
+    def test_next_run_for_daily_job_outside_window_goes_to_next_day(self) -> None:
+        now = dt.datetime(2026, 1, 2, 11, 58, 42).timestamp()
+        next_ts = next_run_for_daily_job("11:58", now, catch_up_window_s=30)
+        expected = dt.datetime(2026, 1, 3, 11, 58, 0).timestamp()
+        self.assertEqual(next_ts, expected)
+
+    def test_resolve_executable_uses_fallback_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", return_value=None):
+                        resolved = resolve_executable("pueue")
+
+            self.assertEqual(resolved, str(pueue))
+
+    def test_check_dependencies_raises_with_fallback_paths_in_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", return_value=None):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            check_dependencies()
+
+        self.assertIn("fallback locations", str(ctx.exception))
+
+    def test_check_dependencies_logs_resolved_pueue_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            def which_side_effect(binary: str):
+                if binary == "pueue":
+                    return None
+                if binary == "git":
+                    return "/usr/bin/git"
+                return None
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", side_effect=which_side_effect):
+                        with patch.object(buildbot, "log_event") as log_mock:
+                            check_dependencies()
+
+        log_mock.assert_any_call("INFO", f"using pueue executable: {str(pueue)}")
+
 
 class LoadYamlConfigTests(unittest.TestCase):
     def test_rejects_non_list_yaml(self) -> None:
@@ -387,6 +453,23 @@ class LoadYamlConfigTests(unittest.TestCase):
             data = load_yaml_config(path)
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["name"], "x")
+
+    def test_reports_invalid_yaml_with_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-syntax.yaml"
+            path.write_text(
+                "- name: bad\n"
+                "  active: true\n"
+                "  at: \"11:35\"\"\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+
+        msg = str(ctx.exception)
+        self.assertIn("Invalid YAML", msg)
+        self.assertIn("line", msg)
+        self.assertIn("column", msg)
 
 
 class ConfigDiscoveryTests(unittest.TestCase):
@@ -506,6 +589,11 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 config_path = parse_config_path_from_service(service)
 
         self.assertEqual(config_path, (home / "dev/alt/gfff.yaml").resolve())
+
+    def test_repo_service_does_not_pin_config_path(self) -> None:
+        service = Path(__file__).resolve().parent.parent / "gfff-buildbot.service"
+        config_path = parse_config_path_from_service(service)
+        self.assertIsNone(config_path)
 
     def test_discovery_uses_installed_service_config_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,6 +847,39 @@ class PrepareRepoForBuildTests(unittest.TestCase):
             self.assertTrue(ok)
             run_repo_mock.assert_not_called()
 
+    def test_scheduled_daily_job_skips_git_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "name": "daily",
+                "path": tmp,
+                "run_mode": "scheduled",
+                "at": "04:00",
+            }
+            with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+                ok = prepare_repo_for_build(job, dry_run=False)
+            self.assertTrue(ok)
+            run_repo_mock.assert_not_called()
+
+    def test_normal_daily_job_still_checks_git_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "name": "daily-normal",
+                "path": tmp,
+                "run_mode": "normal",
+                "at": "04:00",
+                "git_pull": "git pull --ff-only",
+                "git_remote_ref": "@{u}",
+            }
+            side_effect = [
+                cp(),
+                cp(),
+                cp(stdout="abc\n"),
+                cp(stdout="abc\n"),
+            ]
+            with patch.object(buildbot, "run_repo_command", side_effect=side_effect):
+                ok = prepare_repo_for_build(job, dry_run=False)
+            self.assertFalse(ok)
+
 
 class ParseArgsTests(unittest.TestCase):
     def test_accepts_force_flag(self) -> None:
@@ -813,6 +934,14 @@ class ParseArgsTests(unittest.TestCase):
         self.assertTrue(args.once)
         self.assertTrue(args.force)
         self.assertEqual(args.job_name, "my-job")
+
+    def test_accepts_reload_config_seconds(self) -> None:
+        args = parse_args(["--reload-config-seconds", "120"])
+        self.assertEqual(args.reload_config_seconds, 120)
+
+    def test_default_reload_config_seconds(self) -> None:
+        args = parse_args([])
+        self.assertEqual(args.reload_config_seconds, 60)
 
 
 class JobNameFilterTests(unittest.TestCase):
@@ -987,8 +1116,170 @@ class RunLoopTests(unittest.TestCase):
         queued_job = queue_mock.call_args[0][0]
         self.assertEqual(queued_job["name"], "scheduled")
 
+    def test_scheduler_reloads_config_periodically(self) -> None:
+        jobs = [
+            {
+                "name": "initial",
+                "slug": "initial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+        config_paths = [Path("/tmp/reload.yaml")]
+        reloaded_raw_jobs = [
+            {
+                "name": "reloaded",
+                "active": True,
+                "path": "~/repo",
+                "build": "make",
+                "interval": 60,
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=reloaded_raw_jobs) as merge_mock:
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                                with patch.object(buildbot.time, "time", side_effect=[0, 61]):
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                            run_loop(
+                                                jobs=jobs,
+                                                group_prefix="gfff",
+                                                tick=1,
+                                                dry_run=False,
+                                                run_once=False,
+                                                force_run=False,
+                                                config_paths=config_paths,
+                                                reload_config_seconds=60,
+                                            )
+
+        merge_mock.assert_called_once_with(config_paths)
+
+    def test_scheduler_logs_next_run_for_at_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "daily",
+                "slug": "daily",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "11:58",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                            with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                with patch.object(buildbot, "log_event") as log_mock:
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        run_loop(
+                                            jobs=jobs,
+                                            group_prefix="gfff",
+                                            tick=1,
+                                            dry_run=False,
+                                            run_once=False,
+                                            force_run=False,
+                                        )
+
+        messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
+        self.assertTrue(any("startup schedule next-run [daily] at 11:58" in msg for msg in messages))
+
+    def test_scheduler_reload_recomputes_when_at_changes(self) -> None:
+        jobs = [
+            {
+                "name": "pueue-restart",
+                "slug": "pueue-restart",
+                "path": "/tmp",
+                "build": "",
+                "test": "systemctl --user restart pueued.service",
+                "interval": None,
+                "at": "11:58",
+                "run_mode": "scheduled",
+                "manual_install_cmd": "",
+            }
+        ]
+        config_paths = [Path("/tmp/reload.yaml")]
+        reloaded_raw_jobs = [
+            {
+                "name": "pueue-restart",
+                "active": True,
+                "run-mode": "scheduled",
+                "path": "~/dev/pueue",
+                "test": "systemctl --user restart pueued.service",
+                "at": "12:06",
+            }
+        ]
+        # 2026-07-25 12:05:53 local time in the test environment.
+        t0 = dt.datetime(2026, 7, 25, 12, 5, 53).timestamp()
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=reloaded_raw_jobs):
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                                with patch.object(buildbot.time, "time", side_effect=[t0, t0 + 2]):
+                                    with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                        with patch.object(buildbot, "log_event") as log_mock:
+                                            with self.assertRaises(KeyboardInterrupt):
+                                                run_loop(
+                                                    jobs=jobs,
+                                                    group_prefix="gfff",
+                                                    tick=1,
+                                                    dry_run=False,
+                                                    run_once=False,
+                                                    force_run=False,
+                                                    config_paths=config_paths,
+                                                    reload_config_seconds=1,
+                                                )
+
+        messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
+        self.assertTrue(
+            any(
+                "reload schedule next-run [pueue-restart] at 12:06 -> 2026-07-25 12:06:00"
+                in msg
+                for msg in messages
+            )
+        )
+
 
 class MainCheckImportTests(unittest.TestCase):
+    def test_main_logs_config_discovery_summary_line(self) -> None:
+        path_a = Path("/tmp/a.yaml")
+        path_b = Path("/tmp/b.yaml")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with patch.object(buildbot, "check_dependencies"):
+                with patch.object(buildbot, "discover_default_config_paths", return_value=[path_a, path_b]):
+                    with patch.object(buildbot, "merge_jobs_from_configs", return_value=[]):
+                        with patch.object(buildbot, "run_loop", return_value=0):
+                            rc = buildbot.main([])
+
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "config discovery order: /tmp/a.yaml, /tmp/b.yaml",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "startup currently loaded configs: /tmp/a.yaml, /tmp/b.yaml",
+            output.getvalue(),
+        )
+
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "cfg.yaml"
