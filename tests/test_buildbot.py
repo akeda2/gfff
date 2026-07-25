@@ -759,6 +759,39 @@ class PrepareRepoForBuildTests(unittest.TestCase):
             self.assertTrue(ok)
             run_repo_mock.assert_not_called()
 
+    def test_scheduled_daily_job_skips_git_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "name": "daily",
+                "path": tmp,
+                "run_mode": "scheduled",
+                "at": "04:00",
+            }
+            with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+                ok = prepare_repo_for_build(job, dry_run=False)
+            self.assertTrue(ok)
+            run_repo_mock.assert_not_called()
+
+    def test_normal_daily_job_still_checks_git_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "name": "daily-normal",
+                "path": tmp,
+                "run_mode": "normal",
+                "at": "04:00",
+                "git_pull": "git pull --ff-only",
+                "git_remote_ref": "@{u}",
+            }
+            side_effect = [
+                cp(),
+                cp(),
+                cp(stdout="abc\n"),
+                cp(stdout="abc\n"),
+            ]
+            with patch.object(buildbot, "run_repo_command", side_effect=side_effect):
+                ok = prepare_repo_for_build(job, dry_run=False)
+            self.assertFalse(ok)
+
 
 class ParseArgsTests(unittest.TestCase):
     def test_accepts_force_flag(self) -> None:

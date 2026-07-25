@@ -32,6 +32,10 @@ Before queueing a build, the internal scheduler process does:
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
 3. if changed: run configured `git-pull` (default `git pull --ff-only`)
 
+Exception: jobs configured with both `run-mode: scheduled` and `at` are treated
+as clock-driven actions and are queued at the configured time without git update
+checks.
+
 Only the build phase is queued in `pueue`:
 
 1. optional `cleanup`

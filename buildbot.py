@@ -402,6 +402,8 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
     strict = bool(job.get("git_strict", True))
     git_pull = str(job.get("git_pull", "git pull --ff-only"))
     git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
+    run_mode = str(job.get("run_mode", "normal"))
+    has_daily_schedule = bool(str(job.get("at", "")).strip())
 
     repo_path = Path(str(job["path"]))
     if not repo_path.is_dir():
@@ -410,6 +412,11 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
 
     if force_run:
         log_event("INFO", f"force {label}: skipping git update checks")
+        return True
+
+    if run_mode == "scheduled" and has_daily_schedule:
+        # Daily scheduled jobs are time-driven actions and should not depend on git changes.
+        log_event("INFO", f"{label} scheduled daily job: skipping git update checks")
         return True
 
     if dry_run:
