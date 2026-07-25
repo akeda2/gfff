@@ -845,6 +845,9 @@ def run_loop(
         if next_config_reload is not None and loop_now >= next_config_reload:
             try:
                 log_loaded_configs(config_paths, context="reload")
+                previous_jobs_by_slug = {
+                    str(job.get("slug", "")): job for job in mode_eligible_jobs
+                }
                 reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
                 if job_name_filter:
                     reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
@@ -855,7 +858,16 @@ def run_loop(
                 refreshed_next_runs: Dict[str, float] = {}
                 for job in mode_eligible_jobs:
                     slug = str(job["slug"])
-                    if slug in next_runs:
+                    previous_job = previous_jobs_by_slug.get(slug)
+                    schedule_unchanged = (
+                        previous_job is not None
+                        and str(previous_job.get("at", "")) == str(job.get("at", ""))
+                        and previous_job.get("interval") == job.get("interval")
+                        and str(previous_job.get("run_mode", "normal"))
+                        == str(job.get("run_mode", "normal"))
+                    )
+
+                    if schedule_unchanged and slug in next_runs:
                         refreshed_next_runs[slug] = next_runs[slug]
                     elif job.get("at"):
                         refreshed_next_runs[slug] = next_run_for_daily_job(

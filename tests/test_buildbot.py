@@ -1198,6 +1198,64 @@ class RunLoopTests(unittest.TestCase):
         messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
         self.assertTrue(any("startup schedule next-run [daily] at 11:58" in msg for msg in messages))
 
+    def test_scheduler_reload_recomputes_when_at_changes(self) -> None:
+        jobs = [
+            {
+                "name": "pueue-restart",
+                "slug": "pueue-restart",
+                "path": "/tmp",
+                "build": "",
+                "test": "systemctl --user restart pueued.service",
+                "interval": None,
+                "at": "11:58",
+                "run_mode": "scheduled",
+                "manual_install_cmd": "",
+            }
+        ]
+        config_paths = [Path("/tmp/reload.yaml")]
+        reloaded_raw_jobs = [
+            {
+                "name": "pueue-restart",
+                "active": True,
+                "run-mode": "scheduled",
+                "path": "~/dev/pueue",
+                "test": "systemctl --user restart pueued.service",
+                "at": "12:06",
+            }
+        ]
+        # 2026-07-25 12:05:53 local time in the test environment.
+        t0 = dt.datetime(2026, 7, 25, 12, 5, 53).timestamp()
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=reloaded_raw_jobs):
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
+                                with patch.object(buildbot.time, "time", side_effect=[t0, t0 + 2]):
+                                    with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                        with patch.object(buildbot, "log_event") as log_mock:
+                                            with self.assertRaises(KeyboardInterrupt):
+                                                run_loop(
+                                                    jobs=jobs,
+                                                    group_prefix="gfff",
+                                                    tick=1,
+                                                    dry_run=False,
+                                                    run_once=False,
+                                                    force_run=False,
+                                                    config_paths=config_paths,
+                                                    reload_config_seconds=1,
+                                                )
+
+        messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
+        self.assertTrue(
+            any(
+                "reload schedule next-run [pueue-restart] at 12:06 -> 2026-07-25 12:06:00"
+                in msg
+                for msg in messages
+            )
+        )
+
 
 class MainCheckImportTests(unittest.TestCase):
     def test_main_logs_config_discovery_summary_line(self) -> None:
