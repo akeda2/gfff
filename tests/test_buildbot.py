@@ -442,6 +442,23 @@ class LoadYamlConfigTests(unittest.TestCase):
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["name"], "x")
 
+    def test_reports_invalid_yaml_with_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-syntax.yaml"
+            path.write_text(
+                "- name: bad\n"
+                "  active: true\n"
+                "  at: \"11:35\"\"\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+
+        msg = str(ctx.exception)
+        self.assertIn("Invalid YAML", msg)
+        self.assertIn("line", msg)
+        self.assertIn("column", msg)
+
 
 class ConfigDiscoveryTests(unittest.TestCase):
     def test_discovery_order_cwd_then_user_then_dev(self) -> None:
@@ -560,6 +577,11 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 config_path = parse_config_path_from_service(service)
 
         self.assertEqual(config_path, (home / "dev/alt/gfff.yaml").resolve())
+
+    def test_repo_service_does_not_pin_config_path(self) -> None:
+        service = Path(__file__).resolve().parent.parent / "gfff-buildbot.service"
+        config_path = parse_config_path_from_service(service)
+        self.assertIsNone(config_path)
 
     def test_discovery_uses_installed_service_config_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1076,6 +1098,24 @@ class RunLoopTests(unittest.TestCase):
 
 
 class MainCheckImportTests(unittest.TestCase):
+    def test_main_logs_config_discovery_summary_line(self) -> None:
+        path_a = Path("/tmp/a.yaml")
+        path_b = Path("/tmp/b.yaml")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with patch.object(buildbot, "check_dependencies"):
+                with patch.object(buildbot, "discover_default_config_paths", return_value=[path_a, path_b]):
+                    with patch.object(buildbot, "merge_jobs_from_configs", return_value=[]):
+                        with patch.object(buildbot, "run_loop", return_value=0):
+                            rc = buildbot.main([])
+
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "config discovery order: /tmp/a.yaml, /tmp/b.yaml",
+            output.getvalue(),
+        )
+
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "cfg.yaml"

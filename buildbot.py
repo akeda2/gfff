@@ -78,7 +78,18 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
         ) from exc
 
     raw = config_path.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        else:
+            location = ""
+        problem = getattr(exc, "problem", None)
+        detail = str(problem).strip() if problem else str(exc).strip()
+        raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
+
     if not isinstance(data, list):
         raise ValueError(f"Expected a list of jobs in {config_path}")
 
@@ -968,6 +979,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     )
                 )
+
+        log_event(
+            "INFO",
+            "config discovery order: " + ", ".join(str(path) for path in config_paths),
+        )
 
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")

@@ -231,6 +231,10 @@ If `--config` is not provided, `gfff-buildbot` searches and merges configs in th
 3. development fallback config from user service `ExecStart --config` (if available)
 4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
 
+The shipped user service intentionally starts in `%h` (home) and does not pass
+`--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`
+remains only a fallback source.
+
 Important behavior:
 
 - If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
