@@ -127,6 +127,30 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
     return jobs
 
 
+def dump_yaml_jobs(jobs: List[Dict[str, Any]]) -> str:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyYAML is required. Install it with: pip install pyyaml"
+        ) from exc
+
+    return yaml.safe_dump(jobs, sort_keys=False, allow_unicode=True)
+
+
+def rewrite_job_paths_for_import(
+    jobs: List[Dict[str, Any]], import_base_dir: Path
+) -> List[Dict[str, Any]]:
+    rewritten: List[Dict[str, Any]] = []
+    import_base = str(import_base_dir.expanduser().resolve())
+    for job in jobs:
+        updated_job = dict(job)
+        if "path" in updated_job:
+            updated_job["path"] = import_base
+        rewritten.append(updated_job)
+    return rewritten
+
+
 def parse_config_path_from_service(service_path: Path) -> Optional[Path]:
     if not service_path.is_file():
         return None
@@ -1128,6 +1152,15 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="Allow --import to overwrite an existing file with the same name",
     )
     parser.add_argument(
+        "-a",
+        "--import-adjust-paths",
+        action="store_true",
+        help=(
+            "With --import, rewrite each job 'path' field to the source config's "
+            "directory before saving"
+        ),
+    )
+    parser.add_argument(
         "--no-dev-fallback",
         action="store_true",
         help="Do not include the development repo config in default config discovery",
@@ -1171,6 +1204,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise RuntimeError("Use only one of --check or --import")
         if args.overwrite and not args.import_config:
             raise RuntimeError("--overwrite can only be used together with --import")
+        if args.import_adjust_paths and not args.import_config:
+            raise RuntimeError(
+                "--import-adjust-paths can only be used together with --import"
+            )
         if args.reload_config_seconds < 0:
             raise RuntimeError("--reload-config-seconds must be >= 0")
 
@@ -1182,7 +1219,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if args.import_config:
             source_path = Path(args.import_config).expanduser().resolve()
-            jobs = validate_config_file(source_path)
+            source_jobs = load_yaml_config(source_path)
+            import_jobs = source_jobs
+            if args.import_adjust_paths:
+                import_jobs = rewrite_job_paths_for_import(
+                    source_jobs, import_base_dir=source_path.parent
+                )
+
+            jobs = normalize_jobs(import_jobs)
             target_dir = (Path.home() / USER_CONFIG_PATH.parent).resolve()
             target_dir.mkdir(parents=True, exist_ok=True)
             target_path = target_dir / source_path.name
@@ -1190,7 +1234,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 raise RuntimeError(
                     f"Target already exists: {target_path}. Use --overwrite to replace it."
                 )
-            shutil.copy2(source_path, target_path)
+            if args.import_adjust_paths:
+                target_path.write_text(dump_yaml_jobs(import_jobs), encoding="utf-8")
+            else:
+                shutil.copy2(source_path, target_path)
             print(
                 f"OK: imported {source_path} to {target_path} "
                 f"({len(jobs)} active job(s))"
