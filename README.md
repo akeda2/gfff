@@ -1,6 +1,6 @@
 # gfff
 
-Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
+Git-aware build scheduler driven by `pueue`.
 
 ## Quick Start
 
@@ -184,7 +184,7 @@ If `run-mode` is omitted, behavior is unchanged from previous versions.
 
 ### Requirements
 
-- `pueue`
+- `pueue`. Tip: https://github.com/akeda2/pueue.git is a lightly forked version with some additions for the status command. The the official version works just as well.
 - `git`
 - Python 3
 
