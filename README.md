@@ -2,7 +2,36 @@
 
 Git-aware build scheduler driven by `gfff.yaml` and `pueue`.
 
-## Python buildbot (`using pueue`)
+## Quick Start
+
+1. Install/update package + user service:
+
+```bash
+bash install-buildbot.sh
+```
+
+2. Put job configs in `~/.config/gfff/` (or keep `./gfff.yaml` for local runs).
+
+3. Validate config:
+
+```bash
+gb --check ~/.config/gfff/gfff.yaml
+```
+
+4. Queue one run immediately:
+
+```bash
+gb --once --force
+```
+
+5. Check service and logs:
+
+```bash
+systemctl --user status gfff-buildbot.service
+journalctl --user -u gfff-buildbot.service -f
+```
+
+## Python Buildbot (pueue)
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
@@ -211,16 +240,16 @@ python3 -m venv ~/.local/share/gfff-buildbot/.venv
 
 ### Run
 
-Use the PATH command (installed by `install-buildbot.sh`):
-
-```bash
-gfff-buildbot
-```
-
-Short alias:
+Primary command (recommended):
 
 ```bash
 gb
+```
+
+Equivalent full command:
+
+```bash
+gfff-buildbot
 ```
 
 ### Config Discovery
@@ -268,37 +297,53 @@ Useful flags:
 
 ```bash
 # Queue all active jobs once, then exit
-gfff-buildbot --once
+gb --once
 
 # Queue a specific scheduled job once (explicit manual override for run-mode: scheduled)
-gfff-buildbot --once pueue-restart
+gb --once pueue-restart
 
 # Queue all active jobs once even if git has no updates
-gfff-buildbot --once --force
-
-# Same with short aliases (command and flags)
-gb -o -f
+gb --once --force
 
 # Preview pueue commands without running them
-gfff-buildbot --dry-run
+gb --dry-run
 
 # Short flag aliases
-gfff-buildbot -n -o -f
+gb -n -o -f
 
 # Reload merged config files every 30 seconds in scheduler mode
-gfff-buildbot --reload-config-seconds 30
+gb --reload-config-seconds 30
 
 # Validate a config file
-gfff-buildbot --check /path/to/configfile.yaml
-gfff-buildbot -C /path/to/configfile.yaml
+gb --check /path/to/configfile.yaml
+gb -C /path/to/configfile.yaml
 
 # Validate and import into ~/.config/gfff/
-gfff-buildbot --import /path/to/configfile.yaml
-gfff-buildbot -I /path/to/configfile.yaml
+gb --import /path/to/configfile.yaml
+gb -I /path/to/configfile.yaml
 
 # Overwrite existing target file during import
-gfff-buildbot --import /path/to/configfile.yaml --overwrite
-gfff-buildbot -I /path/to/configfile.yaml -w
+gb --import /path/to/configfile.yaml --overwrite
+gb -I /path/to/configfile.yaml -w
+
+# Full command works the same way
+gfff-buildbot --once --force
+```
+
+Common day-to-day commands:
+
+```bash
+# Run scheduler in foreground
+gb
+
+# Queue one named job now
+gb --once name-of-list-entry
+
+# Queue one named job now, even if no git updates were detected
+gb --once --force name-of-list-entry
+
+# Preview actions only
+gb --dry-run --once
 ```
 
 Run only one specific job by exact `name` (config discovery order is unchanged):
@@ -340,7 +385,7 @@ In CI or other isolated environments, run with an explicit interpreter path, for
 ./.venv/bin/python -m unittest discover -s tests -q
 ```
 
-### Legacy User-Site Install (may fail on modern Ubuntu)
+### Optional User-Site Install (may fail on PEP 668 distros)
 
 ```bash
 python3 -m pip install --user --upgrade .
@@ -351,7 +396,7 @@ If `~/.local/bin` is not in your `PATH`, add it first.
 
 ### Manual Service Setup (if you prefer)
 
-Make sure `ExecStart` in [gfff-buildbot.service](gfff-buildbot.service#L9) points at your chosen install location.
+Make sure `ExecStart` in [gfff-buildbot.service](gfff-buildbot.service) points at your chosen install location.
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -369,29 +414,5 @@ journalctl --user -u gfff-buildbot.service -f
 
 Notes:
 
-- The unit expects this repo at `%h/dev/gfff`.
-- The service runs `%h/.local/share/gfff-buildbot/.venv/bin/gfff-buildbot`.
-
-## Legacy Shell Scripts
-
-The shell helpers remain available for older workflows.
-
-### gfff Script
-
-Fetches from remote and returns true or false:
-
-```bash
-gfff && echo "Updates available!" || echo "No updates"
-```
-
-### Rust Build Example
-
-See `rsb.sh` for a rust/cargo build example.
-
-### Install Legacy Shell Scripts
-
-Use `inst.sh` when you only want the helper shell scripts used by legacy workflows:
-
-```bash
-bash inst.sh
-```
+- The unit runs with `WorkingDirectory=%h` and starts `gfff-buildbot` from the venv path shown in `ExecStart`.
+- The provided service does not pass `--config`, so default config discovery applies (`~/.config/gfff/*.yaml` is the primary source).
