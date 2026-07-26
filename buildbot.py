@@ -314,12 +314,16 @@ def parse_run_mode(value: Any, job_name: str) -> str:
     )
 
 
-def is_job_mode_eligible(job: Dict[str, Any], run_once: bool) -> bool:
+def is_job_mode_eligible(
+    job: Dict[str, Any],
+    run_once: bool,
+    allow_scheduled_in_once: bool = False,
+) -> bool:
     run_mode = str(job.get("run_mode", "normal"))
     if run_mode == "manual":
         return run_once
     if run_mode == "scheduled":
-        return not run_once
+        return (not run_once) or allow_scheduled_in_once
     return True
 
 
@@ -804,7 +808,22 @@ def run_loop(
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
 
-    mode_eligible_jobs = [job for job in jobs if is_job_mode_eligible(job, run_once=run_once)]
+    allow_scheduled_in_once = run_once and bool(job_name_filter)
+    if allow_scheduled_in_once:
+        log_event(
+            "INFO",
+            "allowing scheduled jobs in --once because explicit job filter is set: "
+            + str(job_name_filter),
+        )
+    mode_eligible_jobs = [
+        job
+        for job in jobs
+        if is_job_mode_eligible(
+            job,
+            run_once=run_once,
+            allow_scheduled_in_once=allow_scheduled_in_once,
+        )
+    ]
     if not mode_eligible_jobs:
         if run_once:
             print("No active jobs found for --once run mode.")
@@ -853,7 +872,13 @@ def run_loop(
                     reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
 
                 mode_eligible_jobs = [
-                    job for job in reloaded_jobs if is_job_mode_eligible(job, run_once=run_once)
+                    job
+                    for job in reloaded_jobs
+                    if is_job_mode_eligible(
+                        job,
+                        run_once=run_once,
+                        allow_scheduled_in_once=allow_scheduled_in_once,
+                    )
                 ]
                 refreshed_next_runs: Dict[str, float] = {}
                 for job in mode_eligible_jobs:

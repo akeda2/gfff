@@ -362,6 +362,13 @@ class PrimitiveFunctionTests(unittest.TestCase):
         self.assertTrue(is_job_mode_eligible({"run_mode": "manual"}, run_once=True))
         self.assertFalse(is_job_mode_eligible({"run_mode": "manual"}, run_once=False))
         self.assertFalse(is_job_mode_eligible({"run_mode": "scheduled"}, run_once=True))
+        self.assertTrue(
+            is_job_mode_eligible(
+                {"run_mode": "scheduled"},
+                run_once=True,
+                allow_scheduled_in_once=True,
+            )
+        )
         self.assertTrue(is_job_mode_eligible({"run_mode": "scheduled"}, run_once=False))
 
     def test_next_daily_at_timestamp(self) -> None:
@@ -1068,6 +1075,79 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         prep_mock.assert_not_called()
         queue_mock.assert_not_called()
+
+    def test_once_with_named_filter_allows_scheduled_only_jobs(self) -> None:
+        jobs = [
+            {
+                "name": "scheduled-only",
+                "slug": "scheduled-only",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "scheduled",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True) as prep_mock:
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                    job_name_filter="scheduled-only",
+                                )
+
+        self.assertEqual(rc, 0)
+        prep_mock.assert_called_once()
+        queue_mock.assert_called_once()
+
+    def test_once_with_named_filter_logs_scheduled_override(self) -> None:
+        jobs = [
+            {
+                "name": "scheduled-only",
+                "slug": "scheduled-only",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_mode": "scheduled",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None):
+                                with patch.object(buildbot, "log_event") as log_mock:
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                        job_name_filter="scheduled-only",
+                                    )
+
+        self.assertEqual(rc, 0)
+        log_mock.assert_any_call(
+            "INFO",
+            "allowing scheduled jobs in --once because explicit job filter is set: scheduled-only",
+        )
 
     def test_scheduled_mode_skips_manual_only_jobs(self) -> None:
         jobs = [
