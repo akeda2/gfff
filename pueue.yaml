@@ -3,7 +3,7 @@
   path: ~/dev/pueue
   pre-build: ./inst.sh --install-cargo
   build: ./inst.sh --mode user --install-completions --yes
-  post-build: gb -I pueue.yaml -w
+  post-build: gb -I pueue.yaml -w -a
   interval: 3600
 - name: pueue-restart
   active: true
