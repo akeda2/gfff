@@ -322,7 +322,8 @@ Additional scheduler option:
 
 - `--reload-config-seconds` controls periodic config reload interval in scheduler mode (default: `60`, `0` disables reload)
 
-`--force` bypasses git update checks and queues the run immediately.
+`--force` bypasses update-detection gating: it still runs `git fetch` and `git pull`,
+then queues the run even when no updates were found.
 This is intended for interactive/manual triggering.
 
 ### Tests

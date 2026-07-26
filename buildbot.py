@@ -520,7 +520,28 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
         return False
 
     if force_run:
-        log_event("INFO", f"force {label}: skipping git update checks")
+        log_event("INFO", f"force {label}: bypassing update-detection gating")
+        if dry_run:
+            print(f"DRY RUN: ({job['path']}) git fetch")
+            print("DRY RUN:", f"({job['path']}) {git_pull}")
+            return True
+
+        fetch_result = run_repo_command(job, "git fetch")
+        if fetch_result.returncode != 0:
+            msg = fetch_result.stderr.strip() or fetch_result.stdout.strip() or "git fetch failed"
+            if strict:
+                raise RuntimeError(f"{label} {msg}")
+            log_event("ERROR", f"force {label}: git fetch failed ({msg}); continuing anyway")
+
+        pull_result = run_repo_command(job, git_pull)
+        if pull_result.returncode != 0:
+            msg = pull_result.stderr.strip() or pull_result.stdout.strip() or "git pull failed"
+            if strict:
+                raise RuntimeError(f"{label} {msg}")
+            log_event("ERROR", f"force {label}: git pull failed ({msg}); continuing anyway")
+        else:
+            log_event("INFO", f"force {label}: git pull completed")
+
         return True
 
     if run_mode == "scheduled" and has_daily_schedule:

@@ -846,13 +846,31 @@ class PrepareRepoForBuildTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertTrue(log_mock.called)
 
-    def test_force_run_skips_git_commands(self) -> None:
+    def test_force_run_executes_git_fetch_and_pull(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            job = {"name": "repo", "path": tmp}
-            with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+            job = {"name": "repo", "path": tmp, "git_pull": "git pull --ff-only"}
+            with patch.object(buildbot, "run_repo_command", side_effect=[cp(), cp()]) as run_repo_mock:
                 ok = prepare_repo_for_build(job, dry_run=False, force_run=True)
             self.assertTrue(ok)
-            run_repo_mock.assert_not_called()
+            self.assertEqual(run_repo_mock.call_count, 2)
+            self.assertEqual(run_repo_mock.call_args_list[0].args[1], "git fetch")
+            self.assertEqual(run_repo_mock.call_args_list[1].args[1], "git pull --ff-only")
+
+    def test_force_run_non_strict_fetch_failure_still_runs_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "name": "repo",
+                "path": tmp,
+                "git_strict": False,
+                "git_pull": "git pull --ff-only",
+            }
+            side_effect = [
+                cp(returncode=1, stderr="fetch failed"),
+                cp(),
+            ]
+            with patch.object(buildbot, "run_repo_command", side_effect=side_effect):
+                ok = prepare_repo_for_build(job, dry_run=False, force_run=True)
+            self.assertTrue(ok)
 
     def test_scheduled_daily_job_skips_git_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
