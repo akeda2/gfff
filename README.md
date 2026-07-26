@@ -71,7 +71,7 @@ Optional per-job run mode:
 
 - `run-mode: normal` (default when omitted): run in both scheduler mode and `--once`
 - `run-mode: manual`: run only when invoked manually with `--once`
-- `run-mode: scheduled`: run only in scheduler mode (`at`/`interval` loop), never in `--once`
+- `run-mode: scheduled`: run in scheduler mode (`at`/`interval` loop). It is skipped by plain `--once`, but allowed with `--once <job-name>` when explicitly targeted.
 
 Logging now includes:
 
@@ -80,6 +80,8 @@ Logging now includes:
 - when a job is added to `pueue` (including task id when available)
 - queued task outcome (`Done` is success only with explicit `result: Success`; other `Done` results are logged as errors)
 - required manual action line with the exact `manual-install-cmd`
+- startup/reload config visibility (`currently loaded configs`)
+- next-run timestamps for `at` jobs during startup/reload scheduling
 
 Example:
 
@@ -136,7 +138,7 @@ Manual-only example (skip normal scheduler loop):
 	interval: 3600
 ```
 
-Scheduled-only example (never run via `--once`):
+Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb -o pueue-restart`):
 
 ```yaml
 - name: pueue-restart
@@ -268,6 +270,9 @@ Useful flags:
 # Queue all active jobs once, then exit
 gfff-buildbot --once
 
+# Queue a specific scheduled job once (explicit manual override for run-mode: scheduled)
+gfff-buildbot --once pueue-restart
+
 # Queue all active jobs once even if git has no updates
 gfff-buildbot --once --force
 
@@ -279,6 +284,9 @@ gfff-buildbot --dry-run
 
 # Short flag aliases
 gfff-buildbot -n -o -f
+
+# Reload merged config files every 30 seconds in scheduler mode
+gfff-buildbot --reload-config-seconds 30
 
 # Validate a config file
 gfff-buildbot --check /path/to/configfile.yaml
@@ -309,6 +317,10 @@ Short option aliases:
 - `-o` for `--once`
 - `-n` for `--dry-run`
 - `-f` for `--force`
+
+Additional scheduler option:
+
+- `--reload-config-seconds` controls periodic config reload interval in scheduler mode (default: `60`, `0` disables reload)
 
 `--force` bypasses git update checks and queues the run immediately.
 This is intended for interactive/manual triggering.
