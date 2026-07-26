@@ -334,6 +334,11 @@ gb -I /path/to/configfile.yaml
 gb --import /path/to/configfile.yaml --overwrite
 gb -I /path/to/configfile.yaml -w
 
+# Import and rewrite all job path fields to the source config directory
+gb --import /path/to/configfile.yaml --import-adjust-paths
+gb -I /path/to/configfile.yaml --import-adjust-paths
+gb -I /path/to/configfile.yaml -a
+
 # Full command works the same way
 gfff-buildbot --once --force
 ```

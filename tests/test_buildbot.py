@@ -1050,6 +1050,14 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args(["--import", "cfg.yaml", "-w"])
         self.assertTrue(args.overwrite)
 
+    def test_accepts_import_adjust_paths_flag(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "--import-adjust-paths"])
+        self.assertTrue(args.import_adjust_paths)
+
+    def test_accepts_import_adjust_paths_short_alias(self) -> None:
+        args = parse_args(["--import", "cfg.yaml", "-a"])
+        self.assertTrue(args.import_adjust_paths)
+
     def test_accepts_job_name_with_other_flags(self) -> None:
         args = parse_args(["-o", "-f", "my-job"])
         self.assertTrue(args.once)
@@ -1595,6 +1603,10 @@ class MainCheckImportTests(unittest.TestCase):
         rc = buildbot.main(["--overwrite"])
         self.assertEqual(rc, 1)
 
+    def test_import_adjust_paths_without_import_fails(self) -> None:
+        rc = buildbot.main(["--import-adjust-paths"])
+        self.assertEqual(rc, 1)
+
     def test_import_existing_file_without_overwrite_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -1666,6 +1678,38 @@ class MainCheckImportTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertEqual(target.read_text(encoding="utf-8"), cfg.read_text(encoding="utf-8"))
+
+    def test_import_with_adjust_paths_rewrites_all_job_paths_to_source_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            repo_dir = Path(tmp) / "another-name"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            cfg = repo_dir / "custom.yaml"
+            cfg.write_text(
+                "- name: one\n"
+                "  active: true\n"
+                "  path: ~/dev/gfff\n"
+                "  build: make\n"
+                "  interval: 60\n"
+                "- name: two\n"
+                "  active: true\n"
+                "  path: /tmp/somewhere\n"
+                "  test: pytest -q\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                rc = buildbot.main(
+                    ["--import", str(cfg), "--import-adjust-paths"]
+                )
+
+            self.assertEqual(rc, 0)
+            target = home / ".config" / "gfff" / "custom.yaml"
+            imported = load_yaml_config(target)
+            self.assertEqual(imported[0]["path"], str(repo_dir.resolve()))
+            self.assertEqual(imported[1]["path"], str(repo_dir.resolve()))
 
 
 if __name__ == "__main__":
