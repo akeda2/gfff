@@ -11,6 +11,7 @@ import buildbot
 from buildbot import (
     CONFIG_FILENAME,
     check_dependencies,
+    disable_job_in_source_config,
     discover_default_config_paths,
     extract_done_result,
     extract_task_state,
@@ -251,6 +252,37 @@ class NormalizeJobsTests(unittest.TestCase):
 
         self.assertIn("invalid 'run-mode'", str(ctx.exception))
 
+    def test_disable_when_run_defaults_to_false(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaults",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertFalse(jobs[0]["disable_when_run"])
+
+    def test_disable_when_run_accepts_true(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "one-shot",
+                    "active": True,
+                    "path": "~/repo",
+                    "test": "pytest -q",
+                    "interval": 60,
+                    "disable-when-run": True,
+                }
+            ]
+        )
+
+        self.assertTrue(jobs[0]["disable_when_run"])
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -316,6 +348,23 @@ class GenerateBuildScriptTests(unittest.TestCase):
             ],
         )
 
+    def test_disable_when_run_is_not_injected_into_script(self) -> None:
+        job = {
+            "name": "pueue-restart",
+            "path": "~/repo",
+            "cleanup_steps": [],
+            "pre_build_steps": ["echo pre"],
+            "test": "true",
+            "build": "",
+            "post_build_steps": [],
+            "disable_when_run": True,
+            "source_config_path": "/tmp/pueue.yaml",
+        }
+
+        script = generate_build_script(job)
+        self.assertNotIn("disable-when-run", script)
+        self.assertEqual(script.splitlines()[2], "echo pre")
+
 
 class PrimitiveFunctionTests(unittest.TestCase):
     def test_parse_bool_accepts_strings_and_bools(self) -> None:
@@ -355,6 +404,53 @@ class PrimitiveFunctionTests(unittest.TestCase):
         self.assertEqual(parse_run_mode("SCHEDULED", "job"), "scheduled")
         with self.assertRaises(ValueError):
             parse_run_mode("bad", "job")
+
+    def test_disable_job_in_source_config_flips_active_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "cfg.yaml"
+            config_path.write_text(
+                                """- name: other
+    active: true
+    interval: 60
+- name: target
+    active: true
+    interval: 60
+""",
+                encoding="utf-8",
+            )
+            disable_job_in_source_config(
+                {
+                    "name": "target",
+                    "source_config_path": str(config_path),
+                },
+                dry_run=False,
+            )
+
+            text = config_path.read_text(encoding="utf-8")
+            self.assertRegex(
+                text,
+                r"- name: target\n[ \t]*active:[ \t]*false",
+            )
+            self.assertRegex(
+                text,
+                r"- name: other\n[ \t]*active:[ \t]*true",
+            )
+
+    def test_disable_job_in_source_config_dry_run_keeps_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "cfg.yaml"
+            original = """- name: target\n  active: true\n  interval: 60\n"""
+            config_path.write_text(original, encoding="utf-8")
+
+            disable_job_in_source_config(
+                {
+                    "name": "target",
+                    "source_config_path": str(config_path),
+                },
+                dry_run=True,
+            )
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
 
     def test_is_job_mode_eligible(self) -> None:
         self.assertTrue(is_job_mode_eligible({"run_mode": "normal"}, run_once=True))
@@ -968,6 +1064,10 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args([])
         self.assertEqual(args.reload_config_seconds, 60)
 
+    def test_accepts_disable_when_run_flag(self) -> None:
+        args = parse_args(["--disable-when-run"])
+        self.assertTrue(args.disable_when_run)
+
 
 class JobNameFilterTests(unittest.TestCase):
     def test_filters_to_exact_name(self) -> None:
@@ -985,6 +1085,58 @@ class JobNameFilterTests(unittest.TestCase):
 
 
 class RunLoopTests(unittest.TestCase):
+    def test_disable_when_run_happens_before_queue(self) -> None:
+        jobs = [
+            {
+                "name": "pueue-restart",
+                "slug": "pueue-restart",
+                "path": "/tmp",
+                "build": "",
+                "test": "systemctl --user restart pueued.service",
+                "interval": None,
+                "at": "23:59",
+                "disable_when_run": True,
+                "source_config_path": "/tmp/pueue.yaml",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        events: list[str] = []
+
+        def disable_side_effect(*args: object, **kwargs: object) -> None:
+            events.append("disable")
+
+        def queue_side_effect(*args: object, **kwargs: object) -> None:
+            events.append("queue")
+            return None
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(
+                                buildbot,
+                                "disable_job_in_source_config",
+                                side_effect=disable_side_effect,
+                            ):
+                                with patch.object(
+                                    buildbot,
+                                    "queue_job",
+                                    side_effect=queue_side_effect,
+                                ):
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                    )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(events, ["disable", "queue"])
+
     def test_once_force_queues_at_job_immediately(self) -> None:
         jobs = [
             {

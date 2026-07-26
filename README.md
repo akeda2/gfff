@@ -102,6 +102,10 @@ Optional per-job run mode:
 - `run-mode: manual`: run only when invoked manually with `--once`
 - `run-mode: scheduled`: run in scheduler mode (`at`/`interval` loop). It is skipped by plain `--once`, but allowed with `--once <job-name>` when explicitly targeted.
 
+Optional per-job one-shot deactivation:
+
+- `disable-when-run: true`: before running `test`/`build`, flip that job's `active: true` to `active: false` in the source config file where the job was loaded from.
+
 Logging now includes:
 
 - when no git updates are found for a job
@@ -172,6 +176,7 @@ Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb 
 ```yaml
 - name: pueue-restart
 	active: true
+	disable-when-run: true
 	path: ~/dev/pueue
 	test: systemctl --user restart pueued.service
 	run-mode: scheduled
@@ -304,6 +309,9 @@ gb --once pueue-restart
 
 # Queue all active jobs once even if git has no updates
 gb --once --force
+
+# Disable each queued job in its config during this run
+gb --once --disable-when-run
 
 # Preview pueue commands without running them
 gb --dry-run

@@ -237,7 +237,9 @@ def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
                 )
                 continue
             seen_names.add(dedupe_key)
-            merged.append(job)
+            enriched_job = dict(job)
+            enriched_job["__source_config_path"] = str(config_path)
+            merged.append(enriched_job)
 
     return merged
 
@@ -312,6 +314,64 @@ def parse_run_mode(value: Any, job_name: str) -> str:
     raise ValueError(
         f"Job '{job_name}' has invalid 'run-mode': {value!r}. Expected one of: {allowed}"
     )
+
+
+def disable_job_in_source_config(job: Dict[str, Any], dry_run: bool) -> None:
+    source_config_path = str(job.get("source_config_path", "")).strip()
+    if not source_config_path:
+        raise RuntimeError(
+            f"Job '{job.get('name', 'job')}' cannot use disable-when-run without source config metadata"
+        )
+
+    job_name = str(job.get("name", "")).strip()
+    if not job_name:
+        raise RuntimeError("disable-when-run requires a non-empty job name")
+
+    path = Path(source_config_path)
+    if not path.is_file():
+        raise RuntimeError(
+            f"Job '{job_name}' cannot disable itself: config file not found: {path}"
+        )
+
+    text = path.read_text(encoding="utf-8")
+    block_pattern = re.compile(
+        r"(^- name:[ \t]*"
+        + re.escape(job_name)
+        + r"[ \t]*\n)(.*?)(?=^- name:[ \t]*|\Z)",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+    block_match = block_pattern.search(text)
+    if block_match is None:
+        raise RuntimeError(
+            f"Job '{job_name}' cannot disable itself: job block not found in {path}"
+        )
+
+    body = block_match.group(2)
+    new_body, replacements = re.subn(
+        r"^([ \t]*active:[ \t]*)true([ \t]*(?:#.*)?)$",
+        r"\1false\2",
+        body,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if replacements == 0:
+        log_event(
+            "INFO",
+            f"[{job_name}] disable-when-run: active was already false (or missing) in {path}",
+        )
+        return
+
+    updated_text = text[: block_match.start(2)] + new_body + text[block_match.end(2) :]
+    if dry_run:
+        print(
+            "DRY RUN:",
+            f"would set active: false for job '{job_name}' in {path}",
+        )
+        return
+
+    path.write_text(updated_text, encoding="utf-8")
+    log_event("INFO", f"[{job_name}] disable-when-run: set active=false in {path}")
 
 
 def is_job_mode_eligible(
@@ -403,6 +463,9 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
         pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
         post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
+        disable_when_run = parse_bool(
+            job.get("disable-when-run", False), "disable-when-run", name
+        )
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -424,6 +487,8 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "cleanup_steps": cleanup_steps,
                 "pre_build_steps": pre_build_steps,
                 "post_build_steps": post_build_steps,
+                "disable_when_run": disable_when_run,
+                "source_config_path": str(job.get("__source_config_path", "")).strip(),
                 "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
                 "git_strict": git_strict,
                 "git_pull": git_pull,
@@ -725,7 +790,9 @@ def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
     return normalize_task_result(task.get("result"))
 
 
-def queue_job(job: Dict[str, Any], group: str, dry_run: bool) -> Optional[int]:
+def queue_job(
+    job: Dict[str, Any], group: str, dry_run: bool
+) -> Optional[int]:
     script = generate_build_script(job)
     cmd = [
         get_pueue_cmd(),
@@ -825,6 +892,7 @@ def run_loop(
     config_paths: Optional[List[Path]] = None,
     reload_config_seconds: int = 60,
     job_name_filter: Optional[str] = None,
+    disable_when_run: bool = False,
 ) -> int:
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
@@ -943,6 +1011,9 @@ def run_loop(
 
             try:
                 if prepare_repo_for_build(job, dry_run=dry_run, force_run=force_run):
+                    should_disable_when_run = bool(job.get("disable_when_run", False)) or disable_when_run
+                    if should_disable_when_run:
+                        disable_job_in_source_config(job, dry_run=dry_run)
                     task_id = queue_job(job, group=shared_group, dry_run=dry_run)
                     if task_id is not None:
                         tracked_tasks[task_id] = {
@@ -1078,6 +1149,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--disable-when-run",
+        action="store_true",
+        help=(
+            "Disable each queued job in its source config by toggling active: true -> false "
+            "inside that job block"
+        ),
+    )
+    parser.add_argument(
         "job_name",
         nargs="?",
         help="Only run the job with this exact config name",
@@ -1172,6 +1251,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             config_paths=config_paths,
             reload_config_seconds=args.reload_config_seconds,
             job_name_filter=args.job_name,
+            disable_when_run=args.disable_when_run,
         )
     except KeyboardInterrupt:
         print("Interrupted.")
