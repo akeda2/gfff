@@ -76,7 +76,7 @@ Only the build phase is queued in `pueue`:
 `test` runs before `build`. Since the script uses `set -e`, `build` only runs when `test` succeeds.
 If a repo is test-only, omit `build` and set only `test`.
 
-`cleanup`, `pre-build`, and `post-build` accept either:
+`cleanup`, `pre-build`, `test`, `build`, and `post-build` accept either:
 
 - a single command string
 - a YAML list of commands (run in listed order)
