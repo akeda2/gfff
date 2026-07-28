@@ -3,12 +3,6 @@
   path: ~/dev/fresh
   build: ~/.cargo/bin/cargo build --release
   interval: 600
-- name: pueue
-  active: false
-  path: ~/dev/pueue
-  git-remote-ref: akeda/inst
-  build: ./inst.sh
-  interval: 1200
 - name: yt-dlp
   active: true
   path: ~/dev/yt-dlp
@@ -24,24 +18,10 @@
   post-build: PREFIX="~/.local" gmake install
   manual-install-cmd: sudo gmake install
   interval: 3600
-- name: eb
-  active: true
-  path: ~/dev/eb
-  git-remote-ref: origin/rework
-  git-pull: git pull origin rework --ff-only
-  test: make test && pytest -q --tb=short
-  build: which pipx && pipx install . --force
-  post-build: gb -I eb.yaml -a -w
-  interval: 3600
 - name: gfff
   active: true
   path: ~/dev/gfff
   test: python3 -m unittest discover -s tests
   build: ./install-buildbot.sh
   interval: 3600
-- name: brec
-  path: ~/dev/brec
-  active: true
-  test: ./inst.sh buildbot-check
-  build: ./inst.sh buildbot --preserve-service-state
-  at: 03:00
+  
