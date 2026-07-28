@@ -58,8 +58,8 @@ class NormalizeJobsTests(unittest.TestCase):
         )
 
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["build"], "make")
-        self.assertEqual(jobs[0]["test"], "")
+        self.assertEqual(jobs[0]["build_steps"], ["make"])
+        self.assertEqual(jobs[0]["test_steps"], [])
 
     def test_allows_test_only_job(self) -> None:
         jobs = normalize_jobs(
@@ -75,8 +75,25 @@ class NormalizeJobsTests(unittest.TestCase):
         )
 
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["build"], "")
-        self.assertEqual(jobs[0]["test"], "pytest -q")
+        self.assertEqual(jobs[0]["build_steps"], [])
+        self.assertEqual(jobs[0]["test_steps"], ["pytest -q"])
+
+    def test_allows_list_test_and_build_commands(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "multi-test-build",
+                    "active": True,
+                    "path": "~/repo",
+                    "test": ["echo t1", "echo t2"],
+                    "build": ["echo b1", "echo b2"],
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(jobs[0]["test_steps"], ["echo t1", "echo t2"])
+        self.assertEqual(jobs[0]["build_steps"], ["echo b1", "echo b2"])
 
     def test_rejects_job_without_test_and_build(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -326,8 +343,8 @@ class GenerateBuildScriptTests(unittest.TestCase):
             "path": "~/repo",
             "cleanup_steps": ["echo cleanup1", "echo cleanup2"],
             "pre_build_steps": ["echo pre1", "echo pre2"],
-            "test": "pytest -q",
-            "build": "make",
+            "test_steps": ["pytest -q"],
+            "build_steps": ["make"],
             "post_build_steps": ["echo post1", "echo post2"],
         }
 
@@ -345,6 +362,29 @@ class GenerateBuildScriptTests(unittest.TestCase):
                 "make",
                 "echo post1",
                 "echo post2",
+            ],
+        )
+
+    def test_supports_multiple_test_and_build_steps(self) -> None:
+        job = {
+            "path": "~/repo",
+            "cleanup_steps": [],
+            "pre_build_steps": [],
+            "test": ["echo test1", "echo test2"],
+            "build": ["echo build1", "echo build2"],
+            "post_build_steps": [],
+        }
+
+        script = generate_build_script(job)
+        self.assertEqual(
+            script.splitlines(),
+            [
+                "set -e",
+                "cd '~/repo'",
+                "echo test1",
+                "echo test2",
+                "echo build1",
+                "echo build2",
             ],
         )
 

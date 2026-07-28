@@ -449,14 +449,14 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         name = str(job.get("name", "")).strip() or f"job-{idx}"
         path = str(job.get("path", "")).strip()
-        build = str(job.get("build", "")).strip()
-        test = str(job.get("test", "")).strip()
+        test_steps = parse_command_steps(job.get("test", ""), "test", name)
+        build_steps = parse_command_steps(job.get("build", ""), "build", name)
         interval = job.get("interval")
         at = str(job.get("at", "")).strip()
 
         if not path:
             raise ValueError(f"Job '{name}' is missing 'path'")
-        if not build and not test:
+        if not build_steps and not test_steps:
             raise ValueError(f"Job '{name}' must define at least one of 'build' or 'test'")
 
         has_interval = interval not in (None, "")
@@ -503,8 +503,8 @@ def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "name": name,
                 "slug": sanitize_name(name),
                 "path": str(Path(path).expanduser()),
-                "build": build,
-                "test": test,
+                "build_steps": build_steps,
+                "test_steps": test_steps,
                 "interval": interval_s,
                 "at": at_s,
                 "run_mode": run_mode,
@@ -563,6 +563,16 @@ def generate_build_script(job: Dict[str, Any]) -> str:
         "pre-build",
         str(job.get("name", "job")),
     )
+    test_steps = parse_command_steps(
+        job.get("test_steps", job.get("test", "")),
+        "test",
+        str(job.get("name", "job")),
+    )
+    build_steps = parse_command_steps(
+        job.get("build_steps", job.get("build", "")),
+        "build",
+        str(job.get("name", "job")),
+    )
     post_build_steps = parse_command_steps(
         job.get("post_build_steps", job.get("post_build", "")),
         "post-build",
@@ -571,10 +581,8 @@ def generate_build_script(job: Dict[str, Any]) -> str:
 
     lines.extend(cleanup_steps)
     lines.extend(pre_build_steps)
-    if job.get("test"):
-        lines.append(str(job["test"]))
-    if job.get("build"):
-        lines.append(str(job["build"]))
+    lines.extend(test_steps)
+    lines.extend(build_steps)
     lines.extend(post_build_steps)
 
     return "\n".join(lines)

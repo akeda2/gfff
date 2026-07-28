@@ -21,6 +21,7 @@
   active: true
   path: ~/dev/btop
   build: gmake
+  post-build: PREFIX="~/.local" gmake install
   manual-install-cmd: sudo gmake install
   interval: 3600
 - name: eb
