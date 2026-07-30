@@ -307,7 +307,7 @@ gb --once
 # Queue a specific scheduled job once (explicit manual override for run-mode: scheduled)
 gb --once pueue-restart
 
-# Queue all active jobs once even if git has no updates
+# Queue all jobs once (including active: false) even if git has no updates
 gb --once --force
 
 # Disable each queued job in its config during this run
@@ -382,6 +382,8 @@ Additional scheduler option:
 
 `--force` bypasses update-detection gating: it still runs `git fetch` and `git pull`,
 then queues the run even when no updates were found.
+When used with `--once`, it also bypasses the `active: false` filter and includes
+inactive config entries in that one-shot run.
 This is intended for interactive/manual triggering.
 
 ### Tests

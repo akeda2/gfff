@@ -1578,6 +1578,29 @@ class MainCheckImportTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_once_force_includes_inactive_jobs(self) -> None:
+        config_path = Path("/tmp/a.yaml")
+        raw_jobs = [
+            {
+                "name": "inactive-on-purpose",
+                "active": False,
+                "path": "~/repo",
+                "build": "make",
+                "interval": 60,
+            }
+        ]
+
+        with patch.object(buildbot, "check_dependencies"):
+            with patch.object(buildbot, "discover_default_config_paths", return_value=[config_path]):
+                with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                    with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                        rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(len(queued_jobs), 1)
+        self.assertEqual(queued_jobs[0]["name"], "inactive-on-purpose")
+
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "cfg.yaml"
