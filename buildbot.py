@@ -441,10 +441,12 @@ def next_run_for_daily_job(
     return next_ts
 
 
-def normalize_jobs(jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def normalize_jobs(
+    jobs: Iterable[Dict[str, Any]], include_inactive: bool = False
+) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for idx, job in enumerate(jobs, start=1):
-        if not job.get("active", False):
+        if not include_inactive and not job.get("active", False):
             continue
 
         name = str(job.get("name", "")).strip() or f"job-{idx}"
@@ -1288,7 +1290,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")
 
-        jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
+        jobs = normalize_jobs(
+            merge_jobs_from_configs(config_paths),
+            include_inactive=(args.once and args.force),
+        )
         if args.job_name:
             jobs = filter_jobs_by_name(jobs, args.job_name)
             if not jobs:
