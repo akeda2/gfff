@@ -1023,7 +1023,6 @@ def run_loop(
 
         if next_config_reload is not None and loop_now >= next_config_reload:
             try:
-                log_loaded_configs(config_paths, context="reload")
                 previous_jobs_by_slug = {
                     str(job.get("slug", "")): job for job in mode_eligible_jobs
                 }
@@ -1063,10 +1062,6 @@ def run_loop(
                     else:
                         refreshed_next_runs[slug] = loop_now
                 next_runs = refreshed_next_runs
-                log_event(
-                    "INFO",
-                    f"reloaded config: {len(mode_eligible_jobs)} eligible job(s)",
-                )
                 log_at_job_next_runs(mode_eligible_jobs, next_runs, context="reload schedule")
             except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
                 log_event(
