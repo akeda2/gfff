@@ -847,11 +847,14 @@ class QueueJobTests(unittest.TestCase):
             "build": "make",
             "post_build": "",
         }
-        with patch.object(buildbot.subprocess, "run", return_value=cp(stdout="Queued as (id 42)")):
+        with patch.object(buildbot.subprocess, "run", return_value=cp(stdout="Queued as (id 42)")) as run_mock:
             with patch.object(buildbot, "log_event") as log_mock:
                 task_id = queue_job(job, group="gfff", dry_run=False)
         self.assertEqual(task_id, 42)
         self.assertTrue(log_mock.called)
+        run_args = run_mock.call_args.args[0]
+        self.assertIn("-l", run_args)
+        self.assertEqual(run_args[run_args.index("-l") + 1], "repo")
 
     def test_queue_job_dry_run(self) -> None:
         job = {

@@ -828,9 +828,12 @@ def queue_job(
     job: Dict[str, Any], group: str, dry_run: bool
 ) -> Optional[int]:
     script = generate_build_script(job)
+    label = str(job.get("name", "")).strip() or str(job.get("slug", "")).strip() or "job"
     cmd = [
         get_pueue_cmd(),
         "add",
+        "-l",
+        label,
         "-g",
         group,
         "env",
