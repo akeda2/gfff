@@ -25,6 +25,7 @@ USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
 _PUEUE_CMD_CACHE: Optional[str] = None
+DEFAULT_AT_ERROR_RETRY_SECONDS = 300
 
 
 def resolve_executable(binary: str) -> Optional[str]:
@@ -439,6 +440,26 @@ def next_run_for_daily_job(
     if today_target <= from_ts and (from_ts - today_target) <= catch_up_window_s:
         return from_ts
     return next_ts
+
+
+def next_run_after_job_error(
+    job: Dict[str, Any], loop_now: float, at_error_retry_seconds: int
+) -> float:
+    """Compute the next run after a job-level runtime error.
+
+    For daily `at` jobs, optionally retry soon to recover from transient failures
+    (for example DNS/network not yet ready during boot) instead of waiting a day.
+    """
+
+    if job.get("at"):
+        next_daily_run = next_daily_at_timestamp(str(job["at"]), loop_now + 1)
+        if at_error_retry_seconds > 0:
+            retry_ts = loop_now + at_error_retry_seconds
+            if retry_ts < next_daily_run:
+                return retry_ts
+        return next_daily_run
+
+    return loop_now + int(job["interval"])
 
 
 def normalize_jobs(
@@ -928,11 +949,14 @@ def run_loop(
     force_run: bool,
     config_paths: Optional[List[Path]] = None,
     reload_config_seconds: int = 60,
+    at_error_retry_seconds: int = DEFAULT_AT_ERROR_RETRY_SECONDS,
     job_name_filter: Optional[str] = None,
     disable_when_run: bool = False,
 ) -> int:
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
+    if at_error_retry_seconds < 0:
+        raise ValueError("at-error-retry-seconds must be >= 0")
 
     allow_scheduled_in_once = run_once and bool(job_name_filter)
     if allow_scheduled_in_once:
@@ -1076,12 +1100,20 @@ def run_loop(
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 label = "[" + str(job.get("name", job.get("slug", "job"))) + "]"
                 log_event("ERROR", f"skip {label}: scheduler recovered from job error ({exc})")
-                if job.get("at"):
-                    next_runs[job["slug"]] = next_daily_at_timestamp(
-                        str(job["at"]), loop_now + 1
-                    )
-                else:
-                    next_runs[job["slug"]] = loop_now + int(job["interval"])
+                next_run_after_error = next_run_after_job_error(
+                    job,
+                    loop_now,
+                    at_error_retry_seconds=at_error_retry_seconds,
+                )
+                if job.get("at") and at_error_retry_seconds > 0:
+                    next_daily_run = next_daily_at_timestamp(str(job["at"]), loop_now + 1)
+                    if next_run_after_error < next_daily_run:
+                        retry_at = format_local_timestamp(next_run_after_error)
+                        log_event(
+                            "INFO",
+                            f"retry {label}: daily job error fallback retry scheduled at {retry_at}",
+                        )
+                next_runs[job["slug"]] = next_run_after_error
 
         if run_once:
             return 0
@@ -1195,6 +1227,15 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--at-error-retry-seconds",
+        type=int,
+        default=DEFAULT_AT_ERROR_RETRY_SECONDS,
+        help=(
+            "For daily at-jobs, retry after runtime errors after N seconds instead of waiting until the next day "
+            f"(default: {DEFAULT_AT_ERROR_RETRY_SECONDS}, 0 disables fast retry)"
+        ),
+    )
+    parser.add_argument(
         "--disable-when-run",
         action="store_true",
         help=(
@@ -1223,6 +1264,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         if args.reload_config_seconds < 0:
             raise RuntimeError("--reload-config-seconds must be >= 0")
+        if args.at_error_retry_seconds < 0:
+            raise RuntimeError("--at-error-retry-seconds must be >= 0")
 
         if args.check_config:
             config_path = Path(args.check_config).expanduser().resolve()
@@ -1313,6 +1356,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             force_run=args.force,
             config_paths=config_paths,
             reload_config_seconds=args.reload_config_seconds,
+            at_error_retry_seconds=args.at_error_retry_seconds,
             job_name_filter=args.job_name,
             disable_when_run=args.disable_when_run,
         )

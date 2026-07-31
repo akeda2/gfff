@@ -1115,6 +1115,14 @@ class ParseArgsTests(unittest.TestCase):
         args = parse_args([])
         self.assertEqual(args.reload_config_seconds, 60)
 
+    def test_accepts_at_error_retry_seconds(self) -> None:
+        args = parse_args(["--at-error-retry-seconds", "42"])
+        self.assertEqual(args.at_error_retry_seconds, 42)
+
+    def test_default_at_error_retry_seconds(self) -> None:
+        args = parse_args([])
+        self.assertEqual(args.at_error_retry_seconds, buildbot.DEFAULT_AT_ERROR_RETRY_SECONDS)
+
     def test_accepts_disable_when_run_flag(self) -> None:
         args = parse_args(["--disable-when-run"])
         self.assertTrue(args.disable_when_run)
@@ -1136,6 +1144,53 @@ class JobNameFilterTests(unittest.TestCase):
 
 
 class RunLoopTests(unittest.TestCase):
+    def test_daily_job_runtime_error_retries_soon(self) -> None:
+        jobs = [
+            {
+                "name": "daily",
+                "slug": "daily",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "12:00",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        t0 = dt.datetime(2026, 7, 31, 12, 0, 30).timestamp()
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(
+                            buildbot,
+                            "prepare_repo_for_build",
+                            side_effect=[RuntimeError("dns failure"), True],
+                        ) as prep_mock:
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                with patch.object(buildbot.time, "time", side_effect=[t0, t0, t0 + 301]):
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        with patch.object(
+                                            buildbot.time,
+                                            "sleep",
+                                            side_effect=[None, KeyboardInterrupt],
+                                        ):
+                                            run_loop(
+                                                jobs=jobs,
+                                                group_prefix="gfff",
+                                                tick=1,
+                                                dry_run=False,
+                                                run_once=False,
+                                                force_run=False,
+                                                at_error_retry_seconds=300,
+                                            )
+
+        self.assertEqual(prep_mock.call_count, 2)
+        queue_mock.assert_called_once()
+
     def test_disable_when_run_happens_before_queue(self) -> None:
         jobs = [
             {
