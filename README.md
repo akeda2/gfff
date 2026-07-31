@@ -279,6 +279,15 @@ For `at: HH:MM` jobs, the scheduler applies a small catch-up window equal to
 `reload-config-seconds`: if the job is first seen shortly after today's target minute,
 it runs immediately instead of waiting until tomorrow.
 
+If a daily `at` job hits a runtime error during that run (for example DNS/network not
+yet ready right after boot), the scheduler retries after a short delay instead of
+waiting until the next day. The default delay is 300 seconds and can be configured
+with `--at-error-retry-seconds` (`0` disables this fast retry).
+
+Interval jobs get similar runtime-error fallback behavior: after a job-level runtime
+error, the scheduler retries after `--error-retry-seconds` (default 300) instead of
+always waiting the full interval.
+
 Important behavior:
 
 - If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
@@ -321,6 +330,12 @@ gb -n -o -f
 
 # Reload merged config files every 30 seconds in scheduler mode
 gb --reload-config-seconds 30
+
+# Retry failed daily at-jobs after 5 minutes (default is 300)
+gb --at-error-retry-seconds 300
+
+# Retry failed interval jobs quickly (default is 300)
+gb --error-retry-seconds 300
 
 # Validate a config file
 gb --check /path/to/configfile.yaml
@@ -379,6 +394,8 @@ Short option aliases:
 Additional scheduler option:
 
 - `--reload-config-seconds` controls periodic config reload interval in scheduler mode (default: `60`, `0` disables reload)
+- `--error-retry-seconds` controls fast retry delay for failed interval jobs (default: `300`, `0` disables fast retry)
+- `--at-error-retry-seconds` controls fast retry delay for failed daily `at` jobs (default: `300`, `0` disables fast retry)
 
 `--force` bypasses update-detection gating: it still runs `git fetch` and `git pull`,
 then queues the run even when no updates were found.
@@ -431,3 +448,4 @@ Notes:
 
 - The unit runs with `WorkingDirectory=%h` and starts `gfff-buildbot` from the venv path shown in `ExecStart`.
 - The provided service does not pass `--config`, so default config discovery applies (`~/.config/gfff/*.yaml` is the primary source).
+- The unit orders startup after `network-online.target` to reduce boot-time DNS/network race conditions.

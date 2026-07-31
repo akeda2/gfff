@@ -1,7 +1,8 @@
 [Unit]
 Description=gfff buildbot scheduler (pueue)
 Wants=pueued.service
-After=pueued.service
+Wants=network-online.target
+After=pueued.service network-online.target
 
 [Service]
 Type=simple
