@@ -25,6 +25,7 @@ USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
 _PUEUE_CMD_CACHE: Optional[str] = None
+DEFAULT_ERROR_RETRY_SECONDS = 300
 DEFAULT_AT_ERROR_RETRY_SECONDS = 300
 
 
@@ -443,7 +444,10 @@ def next_run_for_daily_job(
 
 
 def next_run_after_job_error(
-    job: Dict[str, Any], loop_now: float, at_error_retry_seconds: int
+    job: Dict[str, Any],
+    loop_now: float,
+    error_retry_seconds: int,
+    at_error_retry_seconds: int,
 ) -> float:
     """Compute the next run after a job-level runtime error.
 
@@ -459,7 +463,10 @@ def next_run_after_job_error(
                 return retry_ts
         return next_daily_run
 
-    return loop_now + int(job["interval"])
+    interval_s = int(job["interval"])
+    if error_retry_seconds > 0:
+        return loop_now + min(interval_s, error_retry_seconds)
+    return loop_now + interval_s
 
 
 def normalize_jobs(
@@ -949,12 +956,15 @@ def run_loop(
     force_run: bool,
     config_paths: Optional[List[Path]] = None,
     reload_config_seconds: int = 60,
+    error_retry_seconds: int = DEFAULT_ERROR_RETRY_SECONDS,
     at_error_retry_seconds: int = DEFAULT_AT_ERROR_RETRY_SECONDS,
     job_name_filter: Optional[str] = None,
     disable_when_run: bool = False,
 ) -> int:
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
+    if error_retry_seconds < 0:
+        raise ValueError("error-retry-seconds must be >= 0")
     if at_error_retry_seconds < 0:
         raise ValueError("at-error-retry-seconds must be >= 0")
 
@@ -1103,6 +1113,7 @@ def run_loop(
                 next_run_after_error = next_run_after_job_error(
                     job,
                     loop_now,
+                    error_retry_seconds=error_retry_seconds,
                     at_error_retry_seconds=at_error_retry_seconds,
                 )
                 if job.get("at") and at_error_retry_seconds > 0:
@@ -1112,6 +1123,15 @@ def run_loop(
                         log_event(
                             "INFO",
                             f"retry {label}: daily job error fallback retry scheduled at {retry_at}",
+                        )
+                elif (not job.get("at")) and error_retry_seconds > 0:
+                    interval_s = int(job["interval"])
+                    retry_delay_s = int(next_run_after_error - loop_now)
+                    if retry_delay_s < interval_s:
+                        retry_at = format_local_timestamp(next_run_after_error)
+                        log_event(
+                            "INFO",
+                            f"retry {label}: interval job error fallback retry in {retry_delay_s}s at {retry_at}",
                         )
                 next_runs[job["slug"]] = next_run_after_error
 
@@ -1227,6 +1247,15 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--error-retry-seconds",
+        type=int,
+        default=DEFAULT_ERROR_RETRY_SECONDS,
+        help=(
+            "Retry interval jobs after runtime errors after N seconds instead of waiting full interval "
+            f"(default: {DEFAULT_ERROR_RETRY_SECONDS}, 0 disables fast retry)"
+        ),
+    )
+    parser.add_argument(
         "--at-error-retry-seconds",
         type=int,
         default=DEFAULT_AT_ERROR_RETRY_SECONDS,
@@ -1264,6 +1293,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         if args.reload_config_seconds < 0:
             raise RuntimeError("--reload-config-seconds must be >= 0")
+        if args.error_retry_seconds < 0:
+            raise RuntimeError("--error-retry-seconds must be >= 0")
         if args.at_error_retry_seconds < 0:
             raise RuntimeError("--at-error-retry-seconds must be >= 0")
 
@@ -1356,6 +1387,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             force_run=args.force,
             config_paths=config_paths,
             reload_config_seconds=args.reload_config_seconds,
+            error_retry_seconds=args.error_retry_seconds,
             at_error_retry_seconds=args.at_error_retry_seconds,
             job_name_filter=args.job_name,
             disable_when_run=args.disable_when_run,

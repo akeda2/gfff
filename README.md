@@ -284,6 +284,10 @@ yet ready right after boot), the scheduler retries after a short delay instead o
 waiting until the next day. The default delay is 300 seconds and can be configured
 with `--at-error-retry-seconds` (`0` disables this fast retry).
 
+Interval jobs get similar runtime-error fallback behavior: after a job-level runtime
+error, the scheduler retries after `--error-retry-seconds` (default 300) instead of
+always waiting the full interval.
+
 Important behavior:
 
 - If the current directory is `~/dev/gfff`, the dev config is still treated as the last source.
@@ -329,6 +333,9 @@ gb --reload-config-seconds 30
 
 # Retry failed daily at-jobs after 5 minutes (default is 300)
 gb --at-error-retry-seconds 300
+
+# Retry failed interval jobs quickly (default is 300)
+gb --error-retry-seconds 300
 
 # Validate a config file
 gb --check /path/to/configfile.yaml
@@ -387,6 +394,7 @@ Short option aliases:
 Additional scheduler option:
 
 - `--reload-config-seconds` controls periodic config reload interval in scheduler mode (default: `60`, `0` disables reload)
+- `--error-retry-seconds` controls fast retry delay for failed interval jobs (default: `300`, `0` disables fast retry)
 - `--at-error-retry-seconds` controls fast retry delay for failed daily `at` jobs (default: `300`, `0` disables fast retry)
 
 `--force` bypasses update-detection gating: it still runs `git fetch` and `git pull`,
