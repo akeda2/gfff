@@ -1,6 +1,6 @@
 # gfff
 
-Git-aware build scheduler driven by `pueue`.
+Simple build scheduler
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ systemctl --user status gfff-buildbot.service
 journalctl --user -u gfff-buildbot.service -f
 ```
 
-## Python Buildbot (pueue)
+## Python Buildbot
 
 `gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
 shared `pueue` group for all projects.
@@ -65,7 +65,7 @@ Exception: jobs configured with both `run-mode: scheduled` and `at` are treated
 as clock-driven actions and are queued at the configured time without git update
 checks.
 
-Only the build phase is queued in `pueue`:
+The build phase is queued in `pueue`:
 
 1. optional `cleanup`
 2. optional `pre-build`
@@ -189,7 +189,7 @@ If `run-mode` is omitted, behavior is unchanged from previous versions.
 
 ### Requirements
 
-- `pueue`. Tip: https://github.com/akeda2/pueue.git is a lightly forked version with some additions for the status command. The the official version works just as well.
+- `pueue`. https://github.com/Nukesor/pueue or an unofficial fork: https://github.com/akeda2/pueue.git with some additions for the status command. The the official version is the recommended.
 - `git`
 - Python 3
 
