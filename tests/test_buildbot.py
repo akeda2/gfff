@@ -32,6 +32,7 @@ from buildbot import (
     parse_at_time,
     parse_args,
     prepare_repo_for_build,
+    queue_label_suffix,
     queue_job,
     resolve_executable,
     run_loop,
@@ -872,6 +873,35 @@ class QueueJobTests(unittest.TestCase):
         self.assertIsNone(task_id)
         self.assertIn("DRY RUN:", output.getvalue())
 
+    def test_queue_job_appends_label_suffix(self) -> None:
+        job = {
+            "name": "repo",
+            "path": "~/repo",
+            "cleanup": "",
+            "pre_build": "",
+            "test": "",
+            "build": "make",
+            "post_build": "",
+        }
+        with patch.object(buildbot.subprocess, "run", return_value=cp(stdout="Queued as (id 7)")) as run_mock:
+            queue_job(job, group="gfff", dry_run=False, label_suffix="(f)")
+        run_args = run_mock.call_args.args[0]
+        self.assertEqual(run_args[run_args.index("-l") + 1], "repo (f)")
+
+
+class QueueLabelSuffixTests(unittest.TestCase):
+    def test_force_has_highest_precedence(self) -> None:
+        self.assertEqual(queue_label_suffix({"at": "12:00"}, run_once=True, force_run=True), "(f)")
+
+    def test_once_suffix(self) -> None:
+        self.assertEqual(queue_label_suffix({"at": ""}, run_once=True, force_run=False), "(o)")
+
+    def test_scheduled_suffix_for_at_jobs(self) -> None:
+        self.assertEqual(queue_label_suffix({"at": "12:00"}, run_once=False, force_run=False), "(s)")
+
+    def test_no_suffix_for_interval_jobs(self) -> None:
+        self.assertEqual(queue_label_suffix({"at": ""}, run_once=False, force_run=False), "")
+
 
 class LogFinishedTaskOutcomesTests(unittest.TestCase):
     def test_logs_success_and_manual_action(self) -> None:
@@ -1330,6 +1360,7 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         prep_mock.assert_called_once()
         queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.kwargs["label_suffix"], "(f)")
 
     def test_once_force_queues_all_eligible_jobs(self) -> None:
         jobs = [
@@ -1608,6 +1639,43 @@ class RunLoopTests(unittest.TestCase):
 
         messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
         self.assertTrue(any("startup schedule next-run [daily] at 11:58" in msg for msg in messages))
+
+    def test_scheduled_at_job_uses_s_label_suffix(self) -> None:
+        jobs = [
+            {
+                "name": "daily",
+                "slug": "daily",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": None,
+                "at": "11:58",
+                "run_mode": "normal",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "next_run_for_daily_job", return_value=0):
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                                with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                    with patch.object(buildbot.time, "time", return_value=0):
+                                        with self.assertRaises(KeyboardInterrupt):
+                                            with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
+                                                run_loop(
+                                                    jobs=jobs,
+                                                    group_prefix="gfff",
+                                                    tick=1,
+                                                    dry_run=False,
+                                                    run_once=False,
+                                                    force_run=False,
+                                                )
+
+        queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.kwargs["label_suffix"], "(s)")
 
     def test_scheduler_reload_recomputes_when_at_changes(self) -> None:
         jobs = [
