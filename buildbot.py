@@ -853,10 +853,12 @@ def extract_done_result(task: Dict[str, Any]) -> Optional[str]:
 
 
 def queue_job(
-    job: Dict[str, Any], group: str, dry_run: bool
+    job: Dict[str, Any], group: str, dry_run: bool, label_suffix: str = ""
 ) -> Optional[int]:
     script = generate_build_script(job)
-    label = str(job.get("name", "")).strip() or str(job.get("slug", "")).strip() or "job"
+    base_label = str(job.get("name", "")).strip() or str(job.get("slug", "")).strip() or "job"
+    normalized_suffix = label_suffix.strip()
+    label = f"{base_label} {normalized_suffix}" if normalized_suffix else base_label
     cmd = [
         get_pueue_cmd(),
         "add",
@@ -938,6 +940,16 @@ def log_finished_task_outcomes(
             )
 
         tracked_tasks.pop(task_id, None)
+
+
+def queue_label_suffix(job: Dict[str, Any], run_once: bool, force_run: bool) -> str:
+    if force_run:
+        return "(f)"
+    if run_once:
+        return "(o)"
+    if str(job.get("at", "")).strip():
+        return "(s)"
+    return ""
 
 
 def check_dependencies() -> None:
@@ -1080,7 +1092,12 @@ def run_loop(
                     should_disable_when_run = bool(job.get("disable_when_run", False)) or disable_when_run
                     if should_disable_when_run:
                         disable_job_in_source_config(job, dry_run=dry_run)
-                    task_id = queue_job(job, group=shared_group, dry_run=dry_run)
+                    task_id = queue_job(
+                        job,
+                        group=shared_group,
+                        dry_run=dry_run,
+                        label_suffix=queue_label_suffix(job, run_once=run_once, force_run=force_run),
+                    )
                     if task_id is not None:
                         tracked_tasks[task_id] = {
                             "job_name": str(job["name"]),
