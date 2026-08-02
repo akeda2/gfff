@@ -1074,7 +1074,6 @@ def run_loop(
                     else:
                         refreshed_next_runs[slug] = loop_now
                 next_runs = refreshed_next_runs
-                log_at_job_next_runs(mode_eligible_jobs, next_runs, context="reload schedule")
             except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
                 log_event(
                     "ERROR",
