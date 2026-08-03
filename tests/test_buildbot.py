@@ -1710,10 +1710,10 @@ class RunLoopTests(unittest.TestCase):
                 with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
                     with patch.object(buildbot, "log_finished_task_outcomes"):
                         with patch.object(buildbot, "merge_jobs_from_configs", return_value=reloaded_raw_jobs):
-                            with patch.object(buildbot, "prepare_repo_for_build", return_value=False):
-                                with patch.object(buildbot.time, "time", side_effect=[t0, t0 + 2]):
-                                    with patch.object(buildbot.time, "sleep", side_effect=KeyboardInterrupt):
-                                        with patch.object(buildbot, "log_event") as log_mock:
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                                with patch.object(buildbot, "queue_job", return_value=101) as queue_job_mock:
+                                    with patch.object(buildbot.time, "time", side_effect=[t0, t0 + 2, t0 + 8]):
+                                        with patch.object(buildbot.time, "sleep", side_effect=[None, KeyboardInterrupt]):
                                             with self.assertRaises(KeyboardInterrupt):
                                                 run_loop(
                                                     jobs=jobs,
@@ -1726,14 +1726,8 @@ class RunLoopTests(unittest.TestCase):
                                                     reload_config_seconds=1,
                                                 )
 
-        messages = [call.args[1] for call in log_mock.call_args_list if len(call.args) > 1]
-        self.assertTrue(
-            any(
-                "reload schedule next-run [pueue-restart] at 12:06 -> 2026-07-25 12:06:00"
-                in msg
-                for msg in messages
-            )
-        )
+        self.assertEqual(queue_job_mock.call_count, 1)
+        self.assertEqual(queue_job_mock.call_args.kwargs["label_suffix"], "(s)")
 
 
 class MainCheckImportTests(unittest.TestCase):
