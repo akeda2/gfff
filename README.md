@@ -261,9 +261,9 @@ gfff-buildbot
 
 If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
 
-1. `./gfff.yaml` (current directory)
-2. local user config directory `~/.config/gfff/`:
+1. local user config directory `~/.config/gfff/`:
 	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
+2. `./gfff.yaml` (current directory)
 3. development fallback config from user service `ExecStart --config` (if available)
 4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
 

@@ -216,11 +216,7 @@ def discover_default_config_paths(
 
     paths: List[Path] = []
 
-    # Rule 1: current directory config, unless it is also the dev config path.
-    if cwd_config.is_file() and (not include_dev_fallback or cwd_config != dev_config):
-        paths.append(cwd_config)
-
-    # Rule 2: local user configs.
+    # Rule 1: local user configs.
     # gfff.yaml is loaded first, then any other *.yaml files in lexical order.
     user_candidates: List[Path] = []
     if user_primary_config.is_file():
@@ -239,6 +235,14 @@ def discover_default_config_paths(
             continue
         if user_config not in paths:
             paths.append(user_config)
+
+    # Rule 2: current directory config, unless it is also the dev config path.
+    if (
+        cwd_config.is_file()
+        and (not include_dev_fallback or cwd_config != dev_config)
+        and cwd_config not in paths
+    ):
+        paths.append(cwd_config)
 
     # Rule 3: dev repo config (always considered last when present).
     if include_dev_fallback and dev_config.is_file() and dev_config not in paths:

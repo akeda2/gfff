@@ -617,7 +617,7 @@ class LoadYamlConfigTests(unittest.TestCase):
 
 
 class ConfigDiscoveryTests(unittest.TestCase):
-    def test_discovery_order_cwd_then_user_then_dev(self) -> None:
+    def test_discovery_order_user_then_cwd_then_dev(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             cwd = Path(tmp) / "cwd"
@@ -639,7 +639,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 with patch.object(buildbot.Path, "cwd", return_value=cwd):
                     paths = discover_default_config_paths()
 
-            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve(), dev_config.resolve()])
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve(), dev_config.resolve()])
 
     def test_dev_config_stays_last_when_cwd_is_dev_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -682,7 +682,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 with patch.object(buildbot.Path, "cwd", return_value=cwd):
                     paths = discover_default_config_paths(include_dev_fallback=False)
 
-            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve()])
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
 
     def test_custom_dev_fallback_path_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -817,6 +817,35 @@ class ConfigMergeTests(unittest.TestCase):
             merged = merge_jobs_from_configs([first, second])
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["path"], "~/repo/a")
+
+    def test_local_user_config_wins_over_cwd_on_name_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/local\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            cwd_config = cwd / CONFIG_FILENAME
+            cwd_config.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/global\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+                    merged = merge_jobs_from_configs(paths)
+
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["path"], "~/repo/local")
 
 
 class TaskResultHelpersTests(unittest.TestCase):
