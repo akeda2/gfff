@@ -684,6 +684,26 @@ class ConfigDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
 
+    def test_discovery_uses_legacy_cwd_config_when_global_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            legacy_cwd_config = cwd / "gfff.yaml"
+            legacy_cwd_config.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+
+            self.assertEqual(paths, [user_config.resolve(), legacy_cwd_config.resolve()])
+
     def test_custom_dev_fallback_path_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -1804,6 +1824,23 @@ class MainCheckImportTests(unittest.TestCase):
         queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
         self.assertEqual(len(queued_jobs), 1)
         self.assertEqual(queued_jobs[0]["name"], "inactive-on-purpose")
+
+    def test_main_with_config_prepends_explicit_before_discovered_paths(self) -> None:
+        explicit = Path("/tmp/explicit.yaml")
+        user = Path("/tmp/user.yaml")
+        cwd = Path("/tmp/cwd.yaml")
+
+        with patch.object(buildbot, "check_dependencies"):
+            with patch.object(buildbot, "discover_default_config_paths", return_value=[user, cwd]):
+                with patch.object(buildbot, "merge_jobs_from_configs", return_value=[]) as merge_mock:
+                    with patch.object(buildbot, "run_loop", return_value=0):
+                        rc = buildbot.main(["--config", str(explicit)])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            merge_mock.call_args.args[0],
+            [explicit.resolve(), user, cwd],
+        )
 
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

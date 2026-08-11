@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Schedule git-aware build jobs from gfff.yaml through pueue."""
+"""Schedule git-aware build jobs from YAML config files through pueue."""
 
 from __future__ import annotations
 
@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-CONFIG_FILENAME = "gfff.yaml"
+CONFIG_FILENAME = "global.yaml"
+LEGACY_CONFIG_FILENAME = "gfff.yaml"
 USER_CONFIG_PATH = Path(".config/gfff/gfff.yaml")
-DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
+DEV_REPO_CONFIG_PATH = Path("dev/gfff/global.yaml")
+LEGACY_DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
@@ -201,14 +203,22 @@ def infer_dev_fallback_config_path(explicit_path: Optional[Path] = None) -> Path
     if repo_service_cfg is not None:
         return repo_service_cfg
 
-    return (home / DEV_REPO_CONFIG_PATH).resolve()
+    primary_dev_fallback = (home / DEV_REPO_CONFIG_PATH).resolve()
+    legacy_dev_fallback = (home / LEGACY_DEV_REPO_CONFIG_PATH).resolve()
+    if primary_dev_fallback.is_file():
+        return primary_dev_fallback
+    if legacy_dev_fallback.is_file():
+        return legacy_dev_fallback
+    return primary_dev_fallback
 
 
 def discover_default_config_paths(
     include_dev_fallback: bool = True,
     dev_fallback_config: Optional[Path] = None,
 ) -> List[Path]:
-    cwd_config = (Path.cwd() / CONFIG_FILENAME).resolve()
+    cwd_primary_config = (Path.cwd() / CONFIG_FILENAME).resolve()
+    cwd_legacy_config = (Path.cwd() / LEGACY_CONFIG_FILENAME).resolve()
+    cwd_config = cwd_primary_config if cwd_primary_config.is_file() else cwd_legacy_config
     home = Path.home()
     user_config_dir = (home / USER_CONFIG_PATH.parent).resolve()
     user_primary_config = (home / USER_CONFIG_PATH).resolve()
@@ -236,7 +246,8 @@ def discover_default_config_paths(
         if user_config not in paths:
             paths.append(user_config)
 
-    # Rule 2: current directory config, unless it is also the dev config path.
+    # Rule 2: current directory config (prefer global.yaml, fallback gfff.yaml),
+    # unless it is also the dev config path.
     if (
         cwd_config.is_file()
         and (not include_dev_fallback or cwd_config != dev_config)
@@ -1172,13 +1183,13 @@ def validate_config_file(config_path: Path) -> List[Dict[str, Any]]:
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run periodic pueue build tasks from gfff.yaml"
+        description="Run periodic pueue build tasks from YAML config files"
     )
     parser.add_argument(
         "-c",
         "--config",
         default=None,
-        help="Path to a gfff yaml config file. When omitted, auto-discovery is used.",
+        help="Path to a config YAML file. When omitted, auto-discovery is used.",
     )
     parser.add_argument(
         "-g",
@@ -1250,7 +1261,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Path to development fallback config used by default config discovery "
-            "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/gfff.yaml)"
+            "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/global.yaml)"
         ),
     )
     parser.add_argument(
@@ -1348,21 +1359,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         check_dependencies()
         config_paths: List[Path]
+        dev_fallback_config = (
+            Path(args.dev_fallback_config).expanduser().resolve()
+            if args.dev_fallback_config
+            else None
+        )
         if args.config:
-            config_paths = [Path(args.config).expanduser().resolve()]
-        else:
-            dev_fallback_config = (
-                Path(args.dev_fallback_config).expanduser().resolve()
-                if args.dev_fallback_config
-                else None
+            explicit_config_path = Path(args.config).expanduser().resolve()
+            config_paths = [explicit_config_path]
+            discovered_paths = discover_default_config_paths(
+                include_dev_fallback=not args.no_dev_fallback,
+                dev_fallback_config=dev_fallback_config,
             )
+            for discovered_path in discovered_paths:
+                if discovered_path not in config_paths:
+                    config_paths.append(discovered_path)
+        else:
             config_paths = discover_default_config_paths(
                 include_dev_fallback=not args.no_dev_fallback,
                 dev_fallback_config=dev_fallback_config,
             )
             if not config_paths:
                 raise RuntimeError(
-                    "No config found. Searched: ./gfff.yaml, ~/.config/gfff/gfff.yaml"
+                    "No config found. Searched: ~/.config/gfff/gfff.yaml, "
+                    "./global.yaml (fallback ./gfff.yaml)"
                     + (
                         ""
                         if args.no_dev_fallback

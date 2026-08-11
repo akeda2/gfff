@@ -10,7 +10,7 @@ Simple build scheduler
 bash install-buildbot.sh
 ```
 
-2. Put job configs in `~/.config/gfff/` (or keep `./gfff.yaml` for local runs).
+2. Put job configs in `~/.config/gfff/` (or keep `./global.yaml` for local/development runs).
 
 3. Validate config:
 
@@ -33,7 +33,7 @@ journalctl --user -u gfff-buildbot.service -f
 
 ## Python Buildbot
 
-`gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
+`gfff-buildbot` reads active entries from configured YAML files and schedules one recurring
 shared `pueue` group for all projects.
 
 On startup, `gfff-buildbot` sets the `gfff` pueue group parallelism to the
@@ -259,13 +259,14 @@ gfff-buildbot
 
 ### Config Discovery
 
-If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
+`gfff-buildbot` merges configs in this order:
 
-1. local user config directory `~/.config/gfff/`:
+1. explicit `--config /path/to/config.yaml` (if provided)
+2. local user config directory `~/.config/gfff/`:
 	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
-2. `./gfff.yaml` (current directory)
-3. development fallback config from user service `ExecStart --config` (if available)
-4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
+3. `./global.yaml` (current directory; legacy fallback: `./gfff.yaml`)
+4. development fallback config from user service `ExecStart --config` (if available)
+5. `~/dev/gfff/global.yaml` (legacy fallback: `~/dev/gfff/gfff.yaml`)
 
 The shipped user service intentionally starts in `%h` (home) and does not pass
 `--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`
@@ -299,7 +300,7 @@ This makes `~/.config/gfff/` the recommended place for user-local defaults and l
 Optional flags for discovery behavior:
 
 - `--no-dev-fallback`: ignore the development fallback config in auto-discovery.
-- `--dev-fallback-config /path/to/gfff.yaml`: use a custom development fallback config path instead of `~/dev/gfff/gfff.yaml`.
+- `--dev-fallback-config /path/to/config.yaml`: use a custom development fallback config path instead of `~/dev/gfff/global.yaml`.
 
 Direct venv path also works:
 
