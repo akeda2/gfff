@@ -33,11 +33,16 @@ journalctl --user -u gfff-buildbot.service -f
 
 ## Python Buildbot
 
-`gfff-buildbot` reads active entries from configured YAML files and schedules one recurring
-shared `pueue` group for all projects.
+`gfff-buildbot` reads active entries from configured YAML files and schedules recurring
+jobs into shared `pueue` groups.
 
-On startup, `gfff-buildbot` sets the `gfff` pueue group parallelism to the
-detected CPU thread count.
+By default, jobs use `queue-mode: parallel` and run in the shared `gfff` group.
+When a job uses `queue-mode: serial`, it is routed to a shared `gfff-serial`
+group that runs one task at a time.
+
+On startup, `gfff-buildbot` sets:
+- `gfff` group parallelism to detected CPU thread count
+- `gfff-serial` group parallelism to `1` (when serial jobs are present)
 
 You can still adjust concurrency with pueue commands (globally or for the
 selected group) based on your machine capacity.
@@ -101,6 +106,11 @@ Optional per-job run mode:
 - `run-mode: normal` (default when omitted): run in both scheduler mode and `--once`
 - `run-mode: manual`: run only when invoked manually with `--once`
 - `run-mode: scheduled`: run in scheduler mode (`at`/`interval` loop). It is skipped by plain `--once`, but allowed with `--once <job-name>` when explicitly targeted.
+
+Optional per-job queue mode:
+
+- `queue-mode: parallel` (default when omitted): route to shared `gfff` group
+- `queue-mode: serial`: route to shared `gfff-serial` group (1 task at a time)
 
 Optional per-job one-shot deactivation:
 
@@ -186,6 +196,7 @@ Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb 
 At least one of `test` or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
 If `run-mode` is omitted, behavior is unchanged from previous versions.
+If `queue-mode` is omitted, behavior defaults to `parallel`.
 
 ### Requirements
 
@@ -267,6 +278,33 @@ gfff-buildbot
 3. `./global.yaml` (current directory; legacy fallback: `./gfff.yaml`)
 4. development fallback config from user service `ExecStart --config` (if available)
 5. `~/dev/gfff/global.yaml` (legacy fallback: `~/dev/gfff/gfff.yaml`)
+
+Each config file may use either format:
+
+1. top-level list of jobs (existing format)
+2. top-level object with optional defaults:
+
+```yaml
+defaults:
+  queue-mode: serial
+jobs:
+  - name: repo-a
+    active: true
+    path: ~/dev/repo-a
+    build: make
+    interval: 60
+  - name: repo-b
+    active: true
+    path: ~/dev/repo-b
+    build: make
+    interval: 60
+    queue-mode: parallel
+```
+
+Queue-mode precedence is:
+- per-job `queue-mode`
+- file-level `defaults.queue-mode`
+- implicit default `parallel`
 
 The shipped user service intentionally starts in `%h` (home) and does not pass
 `--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`

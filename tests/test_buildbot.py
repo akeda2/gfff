@@ -194,6 +194,69 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["git_pull"], "git pull --ff-only")
         self.assertEqual(jobs[0]["git_remote_ref"], "@{u}")
         self.assertTrue(jobs[0]["git_strict"])
+        self.assertEqual(jobs[0]["queue_mode"], "parallel")
+
+    def test_accepts_serial_queue_mode(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "serial-mode",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "queue-mode": "serial",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_rejects_invalid_queue_mode(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "invalid-mode",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "queue-mode": "sometimes",
+                    }
+                ]
+            )
+        self.assertIn("invalid 'queue-mode'", str(ctx.exception))
+
+    def test_uses_file_default_queue_mode(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaulted-serial",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "serial",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_job_queue_mode_overrides_file_default(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "override",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "serial",
+                    "queue-mode": "parallel",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "parallel")
 
     def test_supports_pre_and_post_build_as_lists(self) -> None:
         jobs = normalize_jobs(
@@ -598,6 +661,48 @@ class LoadYamlConfigTests(unittest.TestCase):
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["name"], "x")
 
+    def test_reads_valid_yaml_object_with_defaults_and_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ok-object.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs:\n"
+                "- name: x\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+            data = load_yaml_config(path)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["name"], "x")
+
+    def test_rejects_object_without_jobs_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-object.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("top-level 'jobs' list", str(ctx.exception))
+
+    def test_rejects_invalid_defaults_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-defaults.yaml"
+            path.write_text(
+                "defaults: serial\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Expected 'defaults' to be a mapping", str(ctx.exception))
+
     def test_reports_invalid_yaml_with_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad-syntax.yaml"
@@ -866,6 +971,25 @@ class ConfigMergeTests(unittest.TestCase):
             self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["path"], "~/repo/local")
+
+    def test_merge_applies_file_default_queue_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "object.yaml"
+            cfg.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs:\n"
+                "- name: same\n"
+                "  active: true\n"
+                "  path: ~/repo/a\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            merged = merge_jobs_from_configs([cfg])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["__default_queue_mode"], "serial")
 
 
 class TaskResultHelpersTests(unittest.TestCase):
@@ -1231,6 +1355,100 @@ class JobNameFilterTests(unittest.TestCase):
 
 
 class RunLoopTests(unittest.TestCase):
+    def test_serial_job_queues_to_shared_serial_group(self) -> None:
+        jobs = [
+            {
+                "name": "serial",
+                "slug": "serial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "serial",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group") as ensure_mock:
+            with patch.object(buildbot, "set_group_parallelism") as parallelism_mock:
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                )
+
+        self.assertEqual(rc, 0)
+        ensure_mock.assert_called_once_with("gfff-serial", dry_run=False)
+        parallelism_mock.assert_called_once_with("gfff-serial", parallelism=1, dry_run=False)
+        queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.kwargs["group"], "gfff-serial")
+
+    def test_mixed_queue_modes_configure_parallel_and_serial_groups(self) -> None:
+        jobs = [
+            {
+                "name": "parallel",
+                "slug": "parallel",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "parallel",
+                "manual_install_cmd": "",
+            },
+            {
+                "name": "serial",
+                "slug": "serial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "serial",
+                "manual_install_cmd": "",
+            },
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group") as ensure_mock:
+            with patch.object(buildbot, "set_group_parallelism") as parallelism_mock:
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None):
+                                with patch.object(buildbot.os, "cpu_count", return_value=8):
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                    )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            ensure_mock.call_args_list,
+            [
+                unittest.mock.call("gfff", dry_run=False),
+                unittest.mock.call("gfff-serial", dry_run=False),
+            ],
+        )
+        self.assertEqual(
+            parallelism_mock.call_args_list,
+            [
+                unittest.mock.call("gfff", parallelism=8, dry_run=False),
+                unittest.mock.call("gfff-serial", parallelism=1, dry_run=False),
+            ],
+        )
+
     def test_interval_job_runtime_error_retries_soon(self) -> None:
         jobs = [
             {

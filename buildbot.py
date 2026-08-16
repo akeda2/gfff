@@ -26,6 +26,7 @@ LEGACY_DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
+QUEUE_MODES = {"parallel", "serial"}
 _PUEUE_CMD_CACHE: Optional[str] = None
 DEFAULT_ERROR_RETRY_SECONDS = 300
 DEFAULT_AT_ERROR_RETRY_SECONDS = 300
@@ -99,7 +100,18 @@ def log_at_job_next_runs(
         )
 
 
-def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
+def parse_queue_mode(value: Any, context: str) -> str:
+    queue_mode = str(value).strip().lower()
+    if queue_mode in QUEUE_MODES:
+        return queue_mode
+
+    allowed = ", ".join(sorted(QUEUE_MODES))
+    raise ValueError(
+        f"{context} has invalid 'queue-mode': {value!r}. Expected one of: {allowed}"
+    )
+
+
+def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
     try:
         import yaml  # type: ignore
     except ImportError as exc:
@@ -120,15 +132,49 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
         detail = str(problem).strip() if problem else str(exc).strip()
         raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
 
-    if not isinstance(data, list):
-        raise ValueError(f"Expected a list of jobs in {config_path}")
+    jobs_data: Any
+    defaults: Dict[str, Any] = {}
+    if isinstance(data, list):
+        jobs_data = data
+    elif isinstance(data, dict):
+        if "jobs" not in data:
+            raise ValueError(
+                f"Expected top-level 'jobs' list in {config_path} when using object config format"
+            )
+
+        jobs_data = data.get("jobs")
+        raw_defaults = data.get("defaults", {})
+        if raw_defaults is None:
+            raw_defaults = {}
+        if not isinstance(raw_defaults, dict):
+            raise ValueError(f"Expected 'defaults' to be a mapping in {config_path}")
+        defaults = dict(raw_defaults)
+    else:
+        raise ValueError(
+            f"Expected a list of jobs or an object with 'jobs' in {config_path}"
+        )
+
+    if not isinstance(jobs_data, list):
+        raise ValueError(f"Expected 'jobs' to be a list in {config_path}")
 
     jobs: List[Dict[str, Any]] = []
-    for idx, item in enumerate(data, start=1):
+    for idx, item in enumerate(jobs_data, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"Job #{idx} must be a mapping")
         jobs.append(item)
-    return jobs
+
+    normalized_defaults: Dict[str, Any] = {}
+    if "queue-mode" in defaults:
+        normalized_defaults["queue-mode"] = parse_queue_mode(
+            defaults.get("queue-mode"),
+            f"Config defaults in {config_path}",
+        )
+
+    return {"jobs": jobs, "defaults": normalized_defaults}
+
+
+def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
+    return load_yaml_config_document(config_path)["jobs"]
 
 
 def dump_yaml_jobs(jobs: List[Dict[str, Any]]) -> str:
@@ -267,7 +313,10 @@ def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
     seen_names: set[str] = set()
 
     for config_path in config_paths:
-        jobs = load_yaml_config(config_path)
+        config_document = load_yaml_config_document(config_path)
+        jobs = config_document["jobs"]
+        defaults = config_document["defaults"]
+        default_queue_mode = str(defaults.get("queue-mode", "")).strip()
         for idx, job in enumerate(jobs, start=1):
             raw_name = str(job.get("name", "")).strip()
             dedupe_key = raw_name if raw_name else f"__unnamed__:{config_path}:{idx}"
@@ -280,6 +329,8 @@ def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
             seen_names.add(dedupe_key)
             enriched_job = dict(job)
             enriched_job["__source_config_path"] = str(config_path)
+            if default_queue_mode:
+                enriched_job["__default_queue_mode"] = default_queue_mode
             merged.append(enriched_job)
 
     return merged
@@ -535,6 +586,10 @@ def normalize_jobs(
         disable_when_run = parse_bool(
             job.get("disable-when-run", False), "disable-when-run", name
         )
+        raw_queue_mode = job.get("queue-mode")
+        if raw_queue_mode in (None, ""):
+            raw_queue_mode = job.get("__default_queue_mode", "parallel")
+        queue_mode = parse_queue_mode(raw_queue_mode, f"Job '{name}'")
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -562,6 +617,7 @@ def normalize_jobs(
                 "git_strict": git_strict,
                 "git_pull": git_pull,
                 "git_remote_ref": git_remote_ref,
+                "queue_mode": queue_mode,
             }
         )
 
@@ -1018,11 +1074,28 @@ def run_loop(
             print("No active jobs found for scheduled run mode.")
         return 0
 
-    shared_group = group_prefix
     cpu_threads = max(1, os.cpu_count() or 1)
-    ensure_pueue_group(shared_group, dry_run=dry_run)
-    set_group_parallelism(shared_group, parallelism=cpu_threads, dry_run=dry_run)
-    log_event("INFO", f"configured pueue group '{shared_group}' parallelism to {cpu_threads}")
+    parallel_group = group_prefix
+    serial_group = f"{group_prefix}-serial"
+
+    queue_modes_in_use = {
+        parse_queue_mode(job.get("queue_mode", "parallel"), f"Job '{job.get('name', 'job')}'")
+        for job in mode_eligible_jobs
+    }
+    if "parallel" in queue_modes_in_use:
+        ensure_pueue_group(parallel_group, dry_run=dry_run)
+        set_group_parallelism(parallel_group, parallelism=cpu_threads, dry_run=dry_run)
+        log_event(
+            "INFO",
+            f"configured pueue group '{parallel_group}' parallelism to {cpu_threads}",
+        )
+    if "serial" in queue_modes_in_use:
+        ensure_pueue_group(serial_group, dry_run=dry_run)
+        set_group_parallelism(serial_group, parallelism=1, dry_run=dry_run)
+        log_event(
+            "INFO",
+            f"configured pueue group '{serial_group}' parallelism to 1",
+        )
 
     now = time.time()
     next_runs: Dict[str, float] = {}
@@ -1106,9 +1179,14 @@ def run_loop(
                     should_disable_when_run = bool(job.get("disable_when_run", False)) or disable_when_run
                     if should_disable_when_run:
                         disable_job_in_source_config(job, dry_run=dry_run)
+                    queue_mode = parse_queue_mode(
+                        job.get("queue_mode", "parallel"),
+                        f"Job '{job.get('name', 'job')}'",
+                    )
+                    target_group = serial_group if queue_mode == "serial" else parallel_group
                     task_id = queue_job(
                         job,
-                        group=shared_group,
+                        group=target_group,
                         dry_run=dry_run,
                         label_suffix=queue_label_suffix(job, run_once=run_once, force_run=force_run),
                     )
