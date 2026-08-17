@@ -3,7 +3,7 @@ import datetime as dt
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +11,7 @@ import buildbot
 from buildbot import (
     CONFIG_FILENAME,
     check_dependencies,
+    default_global_defaults_config_path,
     disable_job_in_source_config,
     discover_default_config_paths,
     extract_done_result,
@@ -19,6 +20,7 @@ from buildbot import (
     generate_build_script,
     load_yaml_config,
     log_finished_task_outcomes,
+    load_global_defaults_policy,
     merge_jobs_from_configs,
     normalize_jobs,
     next_run_for_daily_job,
@@ -291,6 +293,41 @@ class NormalizeJobsTests(unittest.TestCase):
             ]
         )
         self.assertEqual(jobs[0]["queue_mode"], "parallel")
+
+    def test_global_defaults_queue_mode_applies_when_job_and_file_defaults_missing(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-default",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ],
+            global_queue_policy={"defaults": {"queue-mode": "serial"}, "overrides": {}},
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_global_overrides_queue_mode_wins_over_job_and_file_defaults(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-force",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "parallel",
+                    "queue-mode": "parallel",
+                }
+            ],
+            global_queue_policy={
+                "defaults": {"queue-mode": "parallel"},
+                "overrides": {"queue-mode": "serial"},
+            },
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
 
     def test_supports_pre_and_post_build_as_lists(self) -> None:
         jobs = normalize_jobs(
@@ -782,6 +819,60 @@ class LoadYamlConfigTests(unittest.TestCase):
         self.assertIn("column", msg)
 
 
+class GlobalDefaultsPolicyTests(unittest.TestCase):
+    def test_default_global_defaults_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            with patch.object(buildbot.Path, "home", return_value=home):
+                path = default_global_defaults_config_path()
+        self.assertEqual(path, (home / ".config" / "gfff" / "defaults.yaml").resolve())
+
+    def test_load_global_defaults_policy_defaults_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "overrides:\n"
+                "  queue-mode: parallel\n",
+                encoding="utf-8",
+            )
+            policy = load_global_defaults_policy(path)
+
+        self.assertEqual(
+            policy,
+            {
+                "defaults": {"queue-mode": "serial"},
+                "overrides": {"queue-mode": "parallel"},
+            },
+        )
+
+    def test_load_global_defaults_policy_rejects_unknown_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults: {}\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_global_defaults_policy(path)
+        self.assertIn("Unknown top-level defaults.yaml key(s)", str(ctx.exception))
+
+    def test_load_global_defaults_policy_rejects_unknown_layer_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_global_defaults_policy(path)
+        self.assertIn("Unknown defaults.yaml defaults", str(ctx.exception))
+
+
 class ConfigDiscoveryTests(unittest.TestCase):
     def test_discovery_order_user_then_cwd_then_dev(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -967,11 +1058,13 @@ class ConfigDiscoveryTests(unittest.TestCase):
             primary = user_dir / "gfff.yaml"
             first = user_dir / "10firstlist.yaml"
             second = user_dir / "30secondlist.yaml"
+            global_defaults = user_dir / "defaults.yaml"
             ignored = user_dir / "notes.txt"
 
             primary.write_text("[]\n", encoding="utf-8")
             first.write_text("[]\n", encoding="utf-8")
             second.write_text("[]\n", encoding="utf-8")
+            global_defaults.write_text("defaults:\n  queue-mode: serial\n", encoding="utf-8")
             ignored.write_text("ignore\n", encoding="utf-8")
 
             with patch.object(buildbot.Path, "home", return_value=home):
@@ -2149,6 +2242,119 @@ class MainCheckImportTests(unittest.TestCase):
         queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
         self.assertEqual(len(queued_jobs), 1)
         self.assertEqual(queued_jobs[0]["name"], "fresh-cleanup")
+
+    def test_main_applies_global_defaults_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "global-defaulted",
+                    "active": True,
+                    "path": "~/repo",
+                    "cleanup": "git clean -fdx",
+                    "interval": 60,
+                }
+            ]
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot, "check_dependencies"):
+                    with patch.object(
+                        buildbot, "discover_default_config_paths", return_value=[config_path]
+                    ):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                            with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(queued_jobs[0]["queue_mode"], "serial")
+        self.assertEqual(
+            run_loop_mock.call_args.kwargs["global_defaults_config_path"],
+            defaults_cfg.resolve(),
+        )
+
+    def test_main_applies_global_overrides_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "overrides:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "global-override",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "queue-mode": "parallel",
+                }
+            ]
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot, "check_dependencies"):
+                    with patch.object(
+                        buildbot, "discover_default_config_paths", return_value=[config_path]
+                    ):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                            with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(queued_jobs[0]["queue_mode"], "serial")
+
+    def test_main_rejects_invalid_global_defaults_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "x",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+
+            err = io.StringIO()
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with redirect_stderr(err):
+                    with patch.object(buildbot, "check_dependencies"):
+                        with patch.object(
+                            buildbot, "discover_default_config_paths", return_value=[config_path]
+                        ):
+                            with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Unknown defaults.yaml defaults", err.getvalue())
 
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

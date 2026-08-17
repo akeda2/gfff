@@ -275,7 +275,7 @@ gfff-buildbot
 
 1. explicit `--config /path/to/config.yaml` (if provided)
 2. local user config directory `~/.config/gfff/`:
-	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
+	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`), excluding reserved `defaults.yaml`
 3. `./global.yaml` (current directory; legacy fallback: `./gfff.yaml`)
 4. development fallback config from user service `ExecStart --config` (if available)
 5. `~/dev/gfff/global.yaml` (legacy fallback: `~/dev/gfff/gfff.yaml`)
@@ -303,9 +303,26 @@ jobs:
 ```
 
 Queue-mode precedence is:
+- `~/.config/gfff/defaults.yaml` `overrides.queue-mode` (force override)
 - per-job `queue-mode`
 - file-level `defaults.queue-mode`
+- `~/.config/gfff/defaults.yaml` `defaults.queue-mode` (fallback)
 - implicit default `parallel`
+
+Optional host-wide policy file:
+
+```yaml
+# ~/.config/gfff/defaults.yaml
+defaults:
+  queue-mode: serial    # fallback only
+overrides:
+  queue-mode: parallel  # force override, even when jobs set queue-mode explicitly
+```
+
+Notes:
+- `defaults.yaml` is optional.
+- In this first version, only `queue-mode` is supported in `defaults.yaml`.
+- Unknown keys in `defaults.yaml` are rejected.
 
 The shipped user service intentionally starts in `%h` (home) and does not pass
 `--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`

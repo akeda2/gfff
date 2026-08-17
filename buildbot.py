@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional
 CONFIG_FILENAME = "global.yaml"
 LEGACY_CONFIG_FILENAME = "gfff.yaml"
 USER_CONFIG_PATH = Path(".config/gfff/gfff.yaml")
+GLOBAL_DEFAULTS_CONFIG_FILENAME = "defaults.yaml"
 DEV_REPO_CONFIG_PATH = Path("dev/gfff/global.yaml")
 LEGACY_DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
@@ -29,6 +30,7 @@ RUN_MODES = {"normal", "manual", "scheduled"}
 QUEUE_MODES = {"parallel", "serial"}
 TOP_LEVEL_CONFIG_KEYS = {"defaults", "jobs"}
 DEFAULT_CONFIG_KEYS = {"queue-mode"}
+GLOBAL_DEFAULTS_TOP_LEVEL_KEYS = {"defaults", "overrides"}
 JOB_CONFIG_KEYS = {
     "name",
     "active",
@@ -131,6 +133,80 @@ def parse_queue_mode(value: Any, context: str) -> str:
     raise ValueError(
         f"{context} has invalid 'queue-mode': {value!r}. Expected one of: {allowed}"
     )
+
+
+def normalize_global_queue_policy_layer(
+    layer: Any, context: str
+) -> Dict[str, str]:
+    if layer is None:
+        return {}
+    if not isinstance(layer, dict):
+        raise ValueError(f"Expected '{context}' to be a mapping")
+
+    unknown_keys = sorted(set(layer.keys()) - DEFAULT_CONFIG_KEYS)
+    if unknown_keys:
+        unknown_text = ", ".join(unknown_keys)
+        raise ValueError(f"Unknown {context} key(s): {unknown_text}")
+
+    normalized: Dict[str, str] = {}
+    if "queue-mode" in layer:
+        normalized["queue-mode"] = parse_queue_mode(
+            layer.get("queue-mode"),
+            context,
+        )
+    return normalized
+
+
+def default_global_defaults_config_path() -> Path:
+    return (
+        Path.home() / USER_CONFIG_PATH.parent / GLOBAL_DEFAULTS_CONFIG_FILENAME
+    ).resolve()
+
+
+def load_global_defaults_policy(config_path: Path) -> Dict[str, Dict[str, str]]:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyYAML is required. Install it with: pip install pyyaml"
+        ) from exc
+
+    raw = config_path.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        else:
+            location = ""
+        problem = getattr(exc, "problem", None)
+        detail = str(problem).strip() if problem else str(exc).strip()
+        raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
+
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Expected a mapping with optional 'defaults'/'overrides' in {config_path}"
+        )
+
+    unknown_top_level_keys = sorted(set(data.keys()) - GLOBAL_DEFAULTS_TOP_LEVEL_KEYS)
+    if unknown_top_level_keys:
+        unknown_text = ", ".join(unknown_top_level_keys)
+        raise ValueError(
+            f"Unknown top-level defaults.yaml key(s) in {config_path}: {unknown_text}"
+        )
+
+    defaults = normalize_global_queue_policy_layer(
+        data.get("defaults"),
+        f"defaults.yaml defaults in {config_path}",
+    )
+    overrides = normalize_global_queue_policy_layer(
+        data.get("overrides"),
+        f"defaults.yaml overrides in {config_path}",
+    )
+    return {"defaults": defaults, "overrides": overrides}
 
 
 def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
@@ -316,6 +392,8 @@ def discover_default_config_paths(
         for candidate in sorted(user_config_dir.glob("*.yaml")):
             resolved = candidate.resolve()
             if resolved == user_primary_config:
+                continue
+            if resolved.name == GLOBAL_DEFAULTS_CONFIG_FILENAME:
                 continue
             user_candidates.append(resolved)
 
@@ -570,8 +648,16 @@ def next_run_after_job_error(
 
 
 def normalize_jobs(
-    jobs: Iterable[Dict[str, Any]], include_inactive: bool = False
+    jobs: Iterable[Dict[str, Any]],
+    include_inactive: bool = False,
+    global_queue_policy: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
+    global_defaults: Dict[str, str] = {}
+    global_overrides: Dict[str, str] = {}
+    if global_queue_policy:
+        global_defaults = global_queue_policy.get("defaults", {})
+        global_overrides = global_queue_policy.get("overrides", {})
+
     normalized: List[Dict[str, Any]] = []
     for idx, job in enumerate(jobs, start=1):
         if not include_inactive and not job.get("active", False):
@@ -628,8 +714,16 @@ def normalize_jobs(
         )
         raw_queue_mode = job.get("queue-mode")
         if raw_queue_mode in (None, ""):
-            raw_queue_mode = job.get("__default_queue_mode", "parallel")
+            raw_queue_mode = job.get(
+                "__default_queue_mode",
+                global_defaults.get("queue-mode", "parallel"),
+            )
         queue_mode = parse_queue_mode(raw_queue_mode, f"Job '{name}'")
+        if "queue-mode" in global_overrides:
+            queue_mode = parse_queue_mode(
+                global_overrides.get("queue-mode"),
+                "Global defaults.yaml overrides",
+            )
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -1083,6 +1177,7 @@ def run_loop(
     at_error_retry_seconds: int = DEFAULT_AT_ERROR_RETRY_SECONDS,
     job_name_filter: Optional[str] = None,
     disable_when_run: bool = False,
+    global_defaults_config_path: Optional[Path] = None,
 ) -> int:
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
@@ -1173,7 +1268,18 @@ def run_loop(
                     )
                 else:
                     reloaded_raw_jobs = merge_jobs_from_configs(config_paths)
-                reloaded_jobs = normalize_jobs(reloaded_raw_jobs)
+                reloaded_global_policy: Optional[Dict[str, Dict[str, str]]] = None
+                if (
+                    global_defaults_config_path is not None
+                    and global_defaults_config_path.is_file()
+                ):
+                    reloaded_global_policy = load_global_defaults_policy(
+                        global_defaults_config_path
+                    )
+                reloaded_jobs = normalize_jobs(
+                    reloaded_raw_jobs,
+                    global_queue_policy=reloaded_global_policy,
+                )
 
                 mode_eligible_jobs = [
                     job
@@ -1525,6 +1631,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")
 
+        global_defaults_config_path = default_global_defaults_config_path()
+        global_queue_policy: Optional[Dict[str, Dict[str, str]]] = None
+        if global_defaults_config_path.is_file():
+            global_queue_policy = load_global_defaults_policy(
+                global_defaults_config_path
+            )
+            log_event(
+                "INFO",
+                "using global defaults policy: " + str(global_defaults_config_path),
+            )
+
         if args.job_name:
             raw_jobs = filter_jobs_by_name(
                 merge_jobs_from_configs(config_paths), args.job_name
@@ -1537,11 +1654,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             jobs = normalize_jobs(
                 raw_jobs,
                 include_inactive=(args.once and args.force),
+                global_queue_policy=global_queue_policy,
             )
         else:
             jobs = normalize_jobs(
                 merge_jobs_from_configs(config_paths),
                 include_inactive=(args.once and args.force),
+                global_queue_policy=global_queue_policy,
             )
         return run_loop(
             jobs=jobs,
@@ -1556,6 +1675,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             at_error_retry_seconds=args.at_error_retry_seconds,
             job_name_filter=args.job_name,
             disable_when_run=args.disable_when_run,
+            global_defaults_config_path=global_defaults_config_path,
         )
     except KeyboardInterrupt:
         print("Interrupted.")
