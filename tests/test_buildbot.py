@@ -245,6 +245,22 @@ class NormalizeJobsTests(unittest.TestCase):
             )
         self.assertIn("invalid 'queue-mode'", str(ctx.exception))
 
+    def test_rejects_unknown_job_field(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "unknown-field",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "runmode": "scheduled",
+                    }
+                ]
+            )
+        self.assertIn("unknown field(s): runmode", str(ctx.exception))
+
     def test_uses_file_default_queue_mode(self) -> None:
         jobs = normalize_jobs(
             [
@@ -720,6 +736,33 @@ class LoadYamlConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_yaml_config(path)
         self.assertIn("Expected 'defaults' to be a mapping", str(ctx.exception))
+
+    def test_rejects_unknown_defaults_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-defaults-key.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Unknown defaults key(s)", str(ctx.exception))
+
+    def test_rejects_unknown_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-top-level.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs: []\n"
+                "runmode: scheduled\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Unknown top-level config key(s)", str(ctx.exception))
 
     def test_reports_invalid_yaml_with_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2077,6 +2120,35 @@ class MainCheckImportTests(unittest.TestCase):
             merge_mock.call_args.args[0],
             [explicit.resolve(), user, cwd],
         )
+
+    def test_main_with_job_name_filters_before_normalize(self) -> None:
+        config_path = Path("/tmp/a.yaml")
+        raw_jobs = [
+            {
+                "name": "broken-other-job",
+                "active": True,
+                "build": "make",
+                "interval": 60,
+            },
+            {
+                "name": "fresh-cleanup",
+                "active": True,
+                "path": "~/repo",
+                "cleanup": "git clean -fdx",
+                "interval": 60,
+            },
+        ]
+
+        with patch.object(buildbot, "check_dependencies"):
+            with patch.object(buildbot, "discover_default_config_paths", return_value=[config_path]):
+                with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                    with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                        rc = buildbot.main(["--once", "--force", "fresh-cleanup"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(len(queued_jobs), 1)
+        self.assertEqual(queued_jobs[0]["name"], "fresh-cleanup")
 
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

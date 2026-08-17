@@ -27,6 +27,28 @@ USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
 QUEUE_MODES = {"parallel", "serial"}
+TOP_LEVEL_CONFIG_KEYS = {"defaults", "jobs"}
+DEFAULT_CONFIG_KEYS = {"queue-mode"}
+JOB_CONFIG_KEYS = {
+    "name",
+    "active",
+    "path",
+    "cleanup",
+    "pre-build",
+    "test",
+    "build",
+    "post-build",
+    "interval",
+    "at",
+    "run-mode",
+    "disable-when-run",
+    "manual-install-cmd",
+    "git-strict",
+    "git-pull",
+    "git-remote-ref",
+    "queue-mode",
+}
+INTERNAL_JOB_KEYS = {"__source_config_path", "__default_queue_mode"}
 _PUEUE_CMD_CACHE: Optional[str] = None
 DEFAULT_ERROR_RETRY_SECONDS = 300
 DEFAULT_AT_ERROR_RETRY_SECONDS = 300
@@ -137,6 +159,12 @@ def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
     if isinstance(data, list):
         jobs_data = data
     elif isinstance(data, dict):
+        unknown_top_level_keys = sorted(set(data.keys()) - TOP_LEVEL_CONFIG_KEYS)
+        if unknown_top_level_keys:
+            unknown_text = ", ".join(unknown_top_level_keys)
+            raise ValueError(
+                f"Unknown top-level config key(s) in {config_path}: {unknown_text}"
+            )
         if "jobs" not in data:
             raise ValueError(
                 f"Expected top-level 'jobs' list in {config_path} when using object config format"
@@ -148,6 +176,12 @@ def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
             raw_defaults = {}
         if not isinstance(raw_defaults, dict):
             raise ValueError(f"Expected 'defaults' to be a mapping in {config_path}")
+        unknown_default_keys = sorted(set(raw_defaults.keys()) - DEFAULT_CONFIG_KEYS)
+        if unknown_default_keys:
+            unknown_text = ", ".join(unknown_default_keys)
+            raise ValueError(
+                f"Unknown defaults key(s) in {config_path}: {unknown_text}"
+            )
         defaults = dict(raw_defaults)
     else:
         raise ValueError(
@@ -544,6 +578,10 @@ def normalize_jobs(
             continue
 
         name = str(job.get("name", "")).strip() or f"job-{idx}"
+        unknown_keys = sorted(set(job.keys()) - JOB_CONFIG_KEYS - INTERNAL_JOB_KEYS)
+        if unknown_keys:
+            unknown_text = ", ".join(unknown_keys)
+            raise ValueError(f"Job '{name}' has unknown field(s): {unknown_text}")
         path = str(job.get("path", "")).strip()
         test_steps = parse_command_steps(job.get("test", ""), "test", name)
         build_steps = parse_command_steps(job.get("build", ""), "build", name)
@@ -1128,9 +1166,14 @@ def run_loop(
                 previous_jobs_by_slug = {
                     str(job.get("slug", "")): job for job in mode_eligible_jobs
                 }
-                reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
                 if job_name_filter:
-                    reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
+                    reloaded_raw_jobs = filter_jobs_by_name(
+                        merge_jobs_from_configs(config_paths),
+                        job_name_filter,
+                    )
+                else:
+                    reloaded_raw_jobs = merge_jobs_from_configs(config_paths)
+                reloaded_jobs = normalize_jobs(reloaded_raw_jobs)
 
                 mode_eligible_jobs = [
                     job
@@ -1482,17 +1525,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")
 
-        jobs = normalize_jobs(
-            merge_jobs_from_configs(config_paths),
-            include_inactive=(args.once and args.force),
-        )
         if args.job_name:
-            jobs = filter_jobs_by_name(jobs, args.job_name)
-            if not jobs:
+            raw_jobs = filter_jobs_by_name(
+                merge_jobs_from_configs(config_paths), args.job_name
+            )
+            if not raw_jobs:
                 raise RuntimeError(
                     f"No active job matched name: {args.job_name}. "
                     "Config files were loaded in normal discovery order."
                 )
+            jobs = normalize_jobs(
+                raw_jobs,
+                include_inactive=(args.once and args.force),
+            )
+        else:
+            jobs = normalize_jobs(
+                merge_jobs_from_configs(config_paths),
+                include_inactive=(args.once and args.force),
+            )
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,

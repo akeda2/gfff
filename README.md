@@ -197,6 +197,7 @@ At least one of `cleanup`, `test`, or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
 If `run-mode` is omitted, behavior is unchanged from previous versions.
 If `queue-mode` is omitted, behavior defaults to `parallel`.
+Unknown config keys are rejected during `--check` and `--import` validation (for example `runmode` is invalid; use `run-mode`).
 
 ### Requirements
 
