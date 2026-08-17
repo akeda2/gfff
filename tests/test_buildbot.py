@@ -96,7 +96,25 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["test_steps"], ["echo t1", "echo t2"])
         self.assertEqual(jobs[0]["build_steps"], ["echo b1", "echo b2"])
 
-    def test_rejects_job_without_test_and_build(self) -> None:
+    def test_allows_cleanup_only_job(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "cleanup-only",
+                    "active": True,
+                    "path": "~/repo",
+                    "cleanup": "git clean -fdx",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["cleanup_steps"], ["git clean -fdx"])
+        self.assertEqual(jobs[0]["test_steps"], [])
+        self.assertEqual(jobs[0]["build_steps"], [])
+
+    def test_rejects_job_without_test_build_or_cleanup(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             normalize_jobs(
                 [
@@ -109,7 +127,7 @@ class NormalizeJobsTests(unittest.TestCase):
                 ]
             )
 
-        self.assertIn("at least one of 'build' or 'test'", str(ctx.exception))
+        self.assertIn("at least one of 'build', 'test', or 'cleanup'", str(ctx.exception))
 
     def test_rejects_invalid_interval(self) -> None:
         with self.assertRaises(ValueError):

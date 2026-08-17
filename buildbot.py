@@ -547,13 +547,16 @@ def normalize_jobs(
         path = str(job.get("path", "")).strip()
         test_steps = parse_command_steps(job.get("test", ""), "test", name)
         build_steps = parse_command_steps(job.get("build", ""), "build", name)
+        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
         interval = job.get("interval")
         at = str(job.get("at", "")).strip()
 
         if not path:
             raise ValueError(f"Job '{name}' is missing 'path'")
-        if not build_steps and not test_steps:
-            raise ValueError(f"Job '{name}' must define at least one of 'build' or 'test'")
+        if not build_steps and not test_steps and not cleanup_steps:
+            raise ValueError(
+                f"Job '{name}' must define at least one of 'build', 'test', or 'cleanup'"
+            )
 
         has_interval = interval not in (None, "")
         has_at = bool(at)
@@ -580,7 +583,6 @@ def normalize_jobs(
         run_mode = parse_run_mode(job.get("run-mode"), name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
-        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
         pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
         post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
         disable_when_run = parse_bool(

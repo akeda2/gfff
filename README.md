@@ -193,7 +193,7 @@ Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb 
 	at: 04:00
 ```
 
-At least one of `test` or `build` must be set for an active job.
+At least one of `cleanup`, `test`, or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
 If `run-mode` is omitted, behavior is unchanged from previous versions.
 If `queue-mode` is omitted, behavior defaults to `parallel`.
