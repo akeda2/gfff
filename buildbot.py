@@ -33,6 +33,7 @@ DEFAULT_CONFIG_KEYS = {"queue-mode"}
 GLOBAL_DEFAULTS_TOP_LEVEL_KEYS = {"defaults", "overrides"}
 JOB_CONFIG_KEYS = {
     "name",
+    "comment",
     "active",
     "path",
     "cleanup",
@@ -675,8 +676,6 @@ def normalize_jobs(
         interval = job.get("interval")
         at = str(job.get("at", "")).strip()
 
-        if not path:
-            raise ValueError(f"Job '{name}' is missing 'path'")
         if not build_steps and not test_steps and not cleanup_steps:
             raise ValueError(
                 f"Job '{name}' must define at least one of 'build', 'test', or 'cleanup'"
@@ -736,7 +735,7 @@ def normalize_jobs(
             {
                 "name": name,
                 "slug": sanitize_name(name),
-                "path": str(Path(path).expanduser()),
+                "path": str(Path(path).expanduser()) if path else "",
                 "build_steps": build_steps,
                 "test_steps": test_steps,
                 "interval": interval_s,
@@ -786,7 +785,10 @@ def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
 
 
 def generate_build_script(job: Dict[str, Any]) -> str:
-    lines = ["set -e", f"cd {shlex.quote(job['path'])}"]
+    lines = ["set -e"]
+    job_path = str(job.get("path", "")).strip()
+    if job_path:
+        lines.append(f"cd {shlex.quote(job_path)}")
 
     cleanup_steps = parse_command_steps(
         job.get("cleanup_steps", job.get("cleanup", "")),
@@ -845,8 +847,13 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
     git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
     run_mode = str(job.get("run_mode", "normal"))
     has_daily_schedule = bool(str(job.get("at", "")).strip())
+    job_path = str(job.get("path", "")).strip()
 
-    repo_path = Path(str(job["path"]))
+    if not job_path:
+        log_event("INFO", f"{label} no path configured: skipping git update checks")
+        return True
+
+    repo_path = Path(job_path)
     if not repo_path.is_dir():
         log_event("ERROR", f"skip {label}: path does not exist: {repo_path}")
         return False
@@ -1157,10 +1164,10 @@ def queue_label_suffix(job: Dict[str, Any], run_once: bool, force_run: bool) -> 
     return ""
 
 
-def check_dependencies() -> None:
+def check_dependencies(require_git: bool = True) -> None:
     pueue_cmd = get_pueue_cmd()
     log_event("INFO", f"using pueue executable: {pueue_cmd}")
-    if shutil.which("git") is None:
+    if require_git and shutil.which("git") is None:
         raise RuntimeError("git is not installed or not in PATH")
 
 
@@ -1586,7 +1593,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 0
 
-        check_dependencies()
         config_paths: List[Path]
         dev_fallback_config = (
             Path(args.dev_fallback_config).expanduser().resolve()
@@ -1662,6 +1668,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 include_inactive=(args.once and args.force),
                 global_queue_policy=global_queue_policy,
             )
+        check_dependencies(
+            require_git=any(str(job.get("path", "")).strip() for job in jobs)
+        )
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,

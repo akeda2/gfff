@@ -60,7 +60,7 @@ pueue parallel -g gfff 4
 pueue parallel 8
 ```
 
-Before queueing a build, the internal scheduler process does:
+Before queueing a build, when a job has `path` configured, the internal scheduler process does:
 
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
@@ -193,10 +193,14 @@ Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb 
 	at: 04:00
 ```
 
+`path` is optional. If omitted, git update checks are skipped and build/test/cleanup
+commands run without a repository `cd`.
+
 At least one of `cleanup`, `test`, or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
 If `run-mode` is omitted, behavior is unchanged from previous versions.
 If `queue-mode` is omitted, behavior defaults to `parallel`.
+Optional `comment` is accepted as a no-op note field and ignored at runtime.
 Unknown config keys are rejected during `--check` and `--import` validation (for example `runmode` is invalid; use `run-mode`).
 
 ### Requirements

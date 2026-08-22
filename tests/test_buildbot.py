@@ -116,6 +116,21 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["test_steps"], [])
         self.assertEqual(jobs[0]["build_steps"], [])
 
+    def test_allows_job_without_path(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-install",
+                    "active": True,
+                    "build": "npm install -g foo",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["path"], "")
+
     def test_rejects_job_without_test_build_or_cleanup(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             normalize_jobs(
@@ -262,6 +277,22 @@ class NormalizeJobsTests(unittest.TestCase):
                 ]
             )
         self.assertIn("unknown field(s): runmode", str(ctx.exception))
+
+    def test_allows_comment_field_and_ignores_it(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "has-comment",
+                    "comment": "human note only",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["name"], "has-comment")
+        self.assertNotIn("comment", jobs[0])
 
     def test_uses_file_default_queue_mode(self) -> None:
         jobs = normalize_jobs(
@@ -472,6 +503,18 @@ class GenerateBuildScriptTests(unittest.TestCase):
 
         script = generate_build_script(job)
         self.assertEqual(script.splitlines(), ["set -e", "cd '~/repo'", "pytest -q"])
+
+    def test_skips_cd_when_path_missing(self) -> None:
+        job = {
+            "cleanup": "",
+            "pre_build": "",
+            "test": "npm update -g npm",
+            "build": "",
+            "post_build": "",
+        }
+
+        script = generate_build_script(job)
+        self.assertEqual(script.splitlines(), ["set -e", "npm update -g npm"])
 
     def test_supports_multiple_pre_and_post_build_steps(self) -> None:
         job = {
@@ -714,6 +757,27 @@ class PrimitiveFunctionTests(unittest.TestCase):
                             check_dependencies()
 
         log_mock.assert_any_call("INFO", f"using pueue executable: {str(pueue)}")
+
+    def test_check_dependencies_can_skip_git_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            def which_side_effect(binary: str):
+                if binary == "pueue":
+                    return None
+                if binary == "git":
+                    return None
+                return None
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", side_effect=which_side_effect):
+                        check_dependencies(require_git=False)
 
 
 class LoadYamlConfigTests(unittest.TestCase):
@@ -1258,6 +1322,13 @@ class LogFinishedTaskOutcomesTests(unittest.TestCase):
 
 
 class PrepareRepoForBuildTests(unittest.TestCase):
+    def test_returns_true_and_skips_git_when_path_missing(self) -> None:
+        job = {"name": "global-install"}
+        with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+            ok = prepare_repo_for_build(job, dry_run=False)
+        self.assertTrue(ok)
+        run_repo_mock.assert_not_called()
+
     def test_returns_false_when_path_missing(self) -> None:
         job = {"name": "repo", "path": "/definitely/missing/path"}
         with patch.object(buildbot, "log_event") as log_mock:
