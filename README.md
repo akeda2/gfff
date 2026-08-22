@@ -167,6 +167,36 @@ Multi-step hook example:
 	interval: 3600
 ```
 
+Full-field interval example (shows every per-job field except `at`; see daily example below for `at`):
+
+```yaml
+- name: full-field-job
+	comment: "Build and package when release branch advances"
+	active: true
+	path: ~/dev/full-field-job
+	cleanup:
+	  - git clean -fdx
+	pre-build:
+	  - ./scripts/bootstrap.sh
+	run-if:
+	  - test -f pyproject.toml
+	  - test -x ./scripts/bootstrap.sh
+	test:
+	  - pytest -q
+	build:
+	  - make release
+	post-build:
+	  - ./scripts/publish-artifacts.sh
+	interval: 1800
+	run-mode: normal
+	disable-when-run: false
+	manual-install-cmd: sudo make install
+	git-strict: false
+	git-pull: git pull origin release --ff-only
+	git-remote-ref: origin/release
+	queue-mode: serial
+```
+
 Daily schedule example:
 
 ```yaml
