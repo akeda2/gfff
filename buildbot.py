@@ -41,6 +41,7 @@ JOB_CONFIG_KEYS = {
     "test",
     "build",
     "post-build",
+    "run-if",
     "interval",
     "at",
     "run-mode",
@@ -708,6 +709,7 @@ def normalize_jobs(
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
         pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
         post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
+        run_if_steps = parse_command_steps(job.get("run-if", ""), "run-if", name)
         disable_when_run = parse_bool(
             job.get("disable-when-run", False), "disable-when-run", name
         )
@@ -744,6 +746,7 @@ def normalize_jobs(
                 "cleanup_steps": cleanup_steps,
                 "pre_build_steps": pre_build_steps,
                 "post_build_steps": post_build_steps,
+                "run_if_steps": run_if_steps,
                 "disable_when_run": disable_when_run,
                 "source_config_path": str(job.get("__source_config_path", "")).strip(),
                 "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
@@ -825,19 +828,59 @@ def generate_build_script(job: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+def run_shell_command(
+    cmd: str, cwd: Optional[str] = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("BASH_ENV", None)
     env.pop("ENV", None)
 
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-lc", cmd],
-        cwd=job["path"],
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+
+
+def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+    return run_shell_command(cmd, cwd=str(job["path"]))
+
+
+def evaluate_run_if(job: Dict[str, Any], dry_run: bool) -> bool:
+    name = str(job.get("name", "job"))
+    label = "[" + name + "]"
+    run_if_steps = parse_command_steps(
+        job.get("run_if_steps", job.get("run-if", "")),
+        "run-if",
+        name,
+    )
+    if not run_if_steps:
+        return True
+
+    job_path = str(job.get("path", "")).strip()
+    if dry_run:
+        for step in run_if_steps:
+            if job_path:
+                print("DRY RUN:", f"({job_path}) run-if: {step}")
+            else:
+                print("DRY RUN:", f"run-if: {step}")
+        return True
+
+    if job_path and not Path(job_path).is_dir():
+        log_event("ERROR", f"skip {label}: run-if path does not exist: {job_path}")
+        return False
+
+    for step in run_if_steps:
+        result = run_shell_command(step, cwd=job_path or None)
+        if result.returncode != 0:
+            msg = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            log_event("INFO", f"skip {label}: run-if condition returned false ({msg})")
+            return False
+
+    return True
 
 
 def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool = False) -> bool:
@@ -1333,6 +1376,15 @@ def run_loop(
                 continue
 
             try:
+                if not evaluate_run_if(job, dry_run=dry_run):
+                    if job.get("at"):
+                        next_runs[job["slug"]] = next_daily_at_timestamp(
+                            str(job["at"]), loop_now + 1
+                        )
+                    else:
+                        next_runs[job["slug"]] = loop_now + int(job["interval"])
+                    continue
+
                 if prepare_repo_for_build(job, dry_run=dry_run, force_run=force_run):
                     should_disable_when_run = bool(job.get("disable_when_run", False)) or disable_when_run
                     if should_disable_when_run:

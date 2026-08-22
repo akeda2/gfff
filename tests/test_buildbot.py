@@ -26,6 +26,7 @@ from buildbot import (
     next_run_for_daily_job,
     normalize_task_result,
     next_daily_at_timestamp,
+    evaluate_run_if,
     is_job_mode_eligible,
     parse_run_mode,
     parse_config_path_from_service,
@@ -466,6 +467,45 @@ class NormalizeJobsTests(unittest.TestCase):
 
         self.assertTrue(jobs[0]["disable_when_run"])
 
+    def test_run_if_defaults_to_empty_steps(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaults",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["run_if_steps"], [])
+
+    def test_run_if_accepts_string_and_list(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "string",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "run-if": "test -f .ready",
+                },
+                {
+                    "name": "list",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "run-if": ["test -f .ready", "test -n \"$HOME\""],
+                },
+            ]
+        )
+
+        self.assertEqual(jobs[0]["run_if_steps"], ["test -f .ready"])
+        self.assertEqual(jobs[1]["run_if_steps"], ["test -f .ready", "test -n \"$HOME\""])
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -622,6 +662,28 @@ class PrimitiveFunctionTests(unittest.TestCase):
         self.assertEqual(parse_run_mode("SCHEDULED", "job"), "scheduled")
         with self.assertRaises(ValueError):
             parse_run_mode("bad", "job")
+
+    def test_evaluate_run_if_defaults_true(self) -> None:
+        self.assertTrue(evaluate_run_if({"name": "job"}, dry_run=False))
+
+    def test_evaluate_run_if_returns_false_on_failed_step(self) -> None:
+        job = {"name": "job", "run_if_steps": ["test -f missing.txt"]}
+        with patch.object(buildbot, "run_shell_command", return_value=cp(returncode=1, stderr="nope")):
+            self.assertFalse(evaluate_run_if(job, dry_run=False))
+
+    def test_evaluate_run_if_runs_steps_in_order(self) -> None:
+        job = {
+            "name": "job",
+            "path": "/tmp",
+            "run_if_steps": ["test -f .ready", "test -n \"$HOME\""],
+        }
+        with patch.object(buildbot, "run_shell_command", side_effect=[cp(), cp()]) as run_mock:
+            self.assertTrue(evaluate_run_if(job, dry_run=False))
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(run_mock.call_args_list[0].args, ("test -f .ready",))
+        self.assertEqual(run_mock.call_args_list[0].kwargs, {"cwd": "/tmp"})
+        self.assertEqual(run_mock.call_args_list[1].args, ("test -n \"$HOME\"",))
+        self.assertEqual(run_mock.call_args_list[1].kwargs, {"cwd": "/tmp"})
 
     def test_disable_job_in_source_config_flips_active_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1819,6 +1881,42 @@ class RunLoopTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(events, ["disable", "queue"])
+
+    def test_run_if_false_skips_before_repo_prepare_and_queue(self) -> None:
+        jobs = [
+            {
+                "name": "guarded",
+                "slug": "guarded",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_if_steps": ["test -f .ready"],
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "evaluate_run_if", return_value=False) as run_if_mock:
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=True) as prep_mock:
+                                with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                    )
+
+        self.assertEqual(rc, 0)
+        run_if_mock.assert_called_once()
+        prep_mock.assert_not_called()
+        queue_mock.assert_not_called()
 
     def test_once_force_queues_at_job_immediately(self) -> None:
         jobs = [

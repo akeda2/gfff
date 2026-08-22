@@ -62,6 +62,7 @@ pueue parallel 8
 
 Before queueing a build, when a job has `path` configured, the internal scheduler process does:
 
+0. optional `run-if` condition check (if configured)
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
 3. if changed: run configured `git-pull` (default `git pull --ff-only`)
@@ -115,6 +116,12 @@ Optional per-job queue mode:
 Optional per-job one-shot deactivation:
 
 - `disable-when-run: true`: before running `test`/`build`, flip that job's `active: true` to `active: false` in the source config file where the job was loaded from.
+
+Optional per-job conditional gate:
+
+- `run-if`: command string (or list of commands) run by the service before git checks and queueing.
+  - if every command exits `0`, the job continues normally
+  - if any command exits non-zero, the job is skipped for that run
 
 Logging now includes:
 
