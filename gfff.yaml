@@ -1,8 +1,3 @@
-- name: fresh
-  active: true
-  path: ~/dev/fresh
-  build: ~/.cargo/bin/cargo build --release
-  interval: 600
 - name: yt-dlp
   active: true
   path: ~/dev/yt-dlp

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Schedule git-aware build jobs from gfff.yaml through pueue."""
+"""Schedule git-aware build jobs from YAML config files through pueue."""
 
 from __future__ import annotations
 
@@ -18,12 +18,41 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-CONFIG_FILENAME = "gfff.yaml"
+CONFIG_FILENAME = "global.yaml"
+LEGACY_CONFIG_FILENAME = "gfff.yaml"
 USER_CONFIG_PATH = Path(".config/gfff/gfff.yaml")
-DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
+GLOBAL_DEFAULTS_CONFIG_FILENAME = "defaults.yaml"
+DEV_REPO_CONFIG_PATH = Path("dev/gfff/global.yaml")
+LEGACY_DEV_REPO_CONFIG_PATH = Path("dev/gfff/gfff.yaml")
 USER_SERVICE_PATH = Path(".config/systemd/user/gfff-buildbot.service")
 REPO_SERVICE_FILE = "gfff-buildbot.service"
 RUN_MODES = {"normal", "manual", "scheduled"}
+QUEUE_MODES = {"parallel", "serial"}
+TOP_LEVEL_CONFIG_KEYS = {"defaults", "jobs"}
+DEFAULT_CONFIG_KEYS = {"queue-mode"}
+GLOBAL_DEFAULTS_TOP_LEVEL_KEYS = {"defaults", "overrides"}
+JOB_CONFIG_KEYS = {
+    "name",
+    "comment",
+    "active",
+    "path",
+    "cleanup",
+    "pre-build",
+    "test",
+    "build",
+    "post-build",
+    "run-if",
+    "interval",
+    "at",
+    "run-mode",
+    "disable-when-run",
+    "manual-install-cmd",
+    "git-strict",
+    "git-pull",
+    "git-remote-ref",
+    "queue-mode",
+}
+INTERNAL_JOB_KEYS = {"__source_config_path", "__default_queue_mode"}
 _PUEUE_CMD_CACHE: Optional[str] = None
 DEFAULT_ERROR_RETRY_SECONDS = 300
 DEFAULT_AT_ERROR_RETRY_SECONDS = 300
@@ -97,7 +126,46 @@ def log_at_job_next_runs(
         )
 
 
-def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
+def parse_queue_mode(value: Any, context: str) -> str:
+    queue_mode = str(value).strip().lower()
+    if queue_mode in QUEUE_MODES:
+        return queue_mode
+
+    allowed = ", ".join(sorted(QUEUE_MODES))
+    raise ValueError(
+        f"{context} has invalid 'queue-mode': {value!r}. Expected one of: {allowed}"
+    )
+
+
+def normalize_global_queue_policy_layer(
+    layer: Any, context: str
+) -> Dict[str, str]:
+    if layer is None:
+        return {}
+    if not isinstance(layer, dict):
+        raise ValueError(f"Expected '{context}' to be a mapping")
+
+    unknown_keys = sorted(set(layer.keys()) - DEFAULT_CONFIG_KEYS)
+    if unknown_keys:
+        unknown_text = ", ".join(unknown_keys)
+        raise ValueError(f"Unknown {context} key(s): {unknown_text}")
+
+    normalized: Dict[str, str] = {}
+    if "queue-mode" in layer:
+        normalized["queue-mode"] = parse_queue_mode(
+            layer.get("queue-mode"),
+            context,
+        )
+    return normalized
+
+
+def default_global_defaults_config_path() -> Path:
+    return (
+        Path.home() / USER_CONFIG_PATH.parent / GLOBAL_DEFAULTS_CONFIG_FILENAME
+    ).resolve()
+
+
+def load_global_defaults_policy(config_path: Path) -> Dict[str, Dict[str, str]]:
     try:
         import yaml  # type: ignore
     except ImportError as exc:
@@ -118,15 +186,107 @@ def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
         detail = str(problem).strip() if problem else str(exc).strip()
         raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
 
-    if not isinstance(data, list):
-        raise ValueError(f"Expected a list of jobs in {config_path}")
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Expected a mapping with optional 'defaults'/'overrides' in {config_path}"
+        )
+
+    unknown_top_level_keys = sorted(set(data.keys()) - GLOBAL_DEFAULTS_TOP_LEVEL_KEYS)
+    if unknown_top_level_keys:
+        unknown_text = ", ".join(unknown_top_level_keys)
+        raise ValueError(
+            f"Unknown top-level defaults.yaml key(s) in {config_path}: {unknown_text}"
+        )
+
+    defaults = normalize_global_queue_policy_layer(
+        data.get("defaults"),
+        f"defaults.yaml defaults in {config_path}",
+    )
+    overrides = normalize_global_queue_policy_layer(
+        data.get("overrides"),
+        f"defaults.yaml overrides in {config_path}",
+    )
+    return {"defaults": defaults, "overrides": overrides}
+
+
+def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyYAML is required. Install it with: pip install pyyaml"
+        ) from exc
+
+    raw = config_path.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        else:
+            location = ""
+        problem = getattr(exc, "problem", None)
+        detail = str(problem).strip() if problem else str(exc).strip()
+        raise ValueError(f"Invalid YAML in {config_path}{location}: {detail}") from exc
+
+    jobs_data: Any
+    defaults: Dict[str, Any] = {}
+    if isinstance(data, list):
+        jobs_data = data
+    elif isinstance(data, dict):
+        unknown_top_level_keys = sorted(set(data.keys()) - TOP_LEVEL_CONFIG_KEYS)
+        if unknown_top_level_keys:
+            unknown_text = ", ".join(unknown_top_level_keys)
+            raise ValueError(
+                f"Unknown top-level config key(s) in {config_path}: {unknown_text}"
+            )
+        if "jobs" not in data:
+            raise ValueError(
+                f"Expected top-level 'jobs' list in {config_path} when using object config format"
+            )
+
+        jobs_data = data.get("jobs")
+        raw_defaults = data.get("defaults", {})
+        if raw_defaults is None:
+            raw_defaults = {}
+        if not isinstance(raw_defaults, dict):
+            raise ValueError(f"Expected 'defaults' to be a mapping in {config_path}")
+        unknown_default_keys = sorted(set(raw_defaults.keys()) - DEFAULT_CONFIG_KEYS)
+        if unknown_default_keys:
+            unknown_text = ", ".join(unknown_default_keys)
+            raise ValueError(
+                f"Unknown defaults key(s) in {config_path}: {unknown_text}"
+            )
+        defaults = dict(raw_defaults)
+    else:
+        raise ValueError(
+            f"Expected a list of jobs or an object with 'jobs' in {config_path}"
+        )
+
+    if not isinstance(jobs_data, list):
+        raise ValueError(f"Expected 'jobs' to be a list in {config_path}")
 
     jobs: List[Dict[str, Any]] = []
-    for idx, item in enumerate(data, start=1):
+    for idx, item in enumerate(jobs_data, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"Job #{idx} must be a mapping")
         jobs.append(item)
-    return jobs
+
+    normalized_defaults: Dict[str, Any] = {}
+    if "queue-mode" in defaults:
+        normalized_defaults["queue-mode"] = parse_queue_mode(
+            defaults.get("queue-mode"),
+            f"Config defaults in {config_path}",
+        )
+
+    return {"jobs": jobs, "defaults": normalized_defaults}
+
+
+def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
+    return load_yaml_config_document(config_path)["jobs"]
 
 
 def dump_yaml_jobs(jobs: List[Dict[str, Any]]) -> str:
@@ -201,14 +361,22 @@ def infer_dev_fallback_config_path(explicit_path: Optional[Path] = None) -> Path
     if repo_service_cfg is not None:
         return repo_service_cfg
 
-    return (home / DEV_REPO_CONFIG_PATH).resolve()
+    primary_dev_fallback = (home / DEV_REPO_CONFIG_PATH).resolve()
+    legacy_dev_fallback = (home / LEGACY_DEV_REPO_CONFIG_PATH).resolve()
+    if primary_dev_fallback.is_file():
+        return primary_dev_fallback
+    if legacy_dev_fallback.is_file():
+        return legacy_dev_fallback
+    return primary_dev_fallback
 
 
 def discover_default_config_paths(
     include_dev_fallback: bool = True,
     dev_fallback_config: Optional[Path] = None,
 ) -> List[Path]:
-    cwd_config = (Path.cwd() / CONFIG_FILENAME).resolve()
+    cwd_primary_config = (Path.cwd() / CONFIG_FILENAME).resolve()
+    cwd_legacy_config = (Path.cwd() / LEGACY_CONFIG_FILENAME).resolve()
+    cwd_config = cwd_primary_config if cwd_primary_config.is_file() else cwd_legacy_config
     home = Path.home()
     user_config_dir = (home / USER_CONFIG_PATH.parent).resolve()
     user_primary_config = (home / USER_CONFIG_PATH).resolve()
@@ -216,11 +384,7 @@ def discover_default_config_paths(
 
     paths: List[Path] = []
 
-    # Rule 1: current directory config, unless it is also the dev config path.
-    if cwd_config.is_file() and (not include_dev_fallback or cwd_config != dev_config):
-        paths.append(cwd_config)
-
-    # Rule 2: local user configs.
+    # Rule 1: local user configs.
     # gfff.yaml is loaded first, then any other *.yaml files in lexical order.
     user_candidates: List[Path] = []
     if user_primary_config.is_file():
@@ -231,6 +395,8 @@ def discover_default_config_paths(
             resolved = candidate.resolve()
             if resolved == user_primary_config:
                 continue
+            if resolved.name == GLOBAL_DEFAULTS_CONFIG_FILENAME:
+                continue
             user_candidates.append(resolved)
 
     for user_config in user_candidates:
@@ -239,6 +405,15 @@ def discover_default_config_paths(
             continue
         if user_config not in paths:
             paths.append(user_config)
+
+    # Rule 2: current directory config (prefer global.yaml, fallback gfff.yaml),
+    # unless it is also the dev config path.
+    if (
+        cwd_config.is_file()
+        and (not include_dev_fallback or cwd_config != dev_config)
+        and cwd_config not in paths
+    ):
+        paths.append(cwd_config)
 
     # Rule 3: dev repo config (always considered last when present).
     if include_dev_fallback and dev_config.is_file() and dev_config not in paths:
@@ -252,7 +427,10 @@ def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
     seen_names: set[str] = set()
 
     for config_path in config_paths:
-        jobs = load_yaml_config(config_path)
+        config_document = load_yaml_config_document(config_path)
+        jobs = config_document["jobs"]
+        defaults = config_document["defaults"]
+        default_queue_mode = str(defaults.get("queue-mode", "")).strip()
         for idx, job in enumerate(jobs, start=1):
             raw_name = str(job.get("name", "")).strip()
             dedupe_key = raw_name if raw_name else f"__unnamed__:{config_path}:{idx}"
@@ -265,6 +443,8 @@ def merge_jobs_from_configs(config_paths: List[Path]) -> List[Dict[str, Any]]:
             seen_names.add(dedupe_key)
             enriched_job = dict(job)
             enriched_job["__source_config_path"] = str(config_path)
+            if default_queue_mode:
+                enriched_job["__default_queue_mode"] = default_queue_mode
             merged.append(enriched_job)
 
     return merged
@@ -470,24 +650,37 @@ def next_run_after_job_error(
 
 
 def normalize_jobs(
-    jobs: Iterable[Dict[str, Any]], include_inactive: bool = False
+    jobs: Iterable[Dict[str, Any]],
+    include_inactive: bool = False,
+    global_queue_policy: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
+    global_defaults: Dict[str, str] = {}
+    global_overrides: Dict[str, str] = {}
+    if global_queue_policy:
+        global_defaults = global_queue_policy.get("defaults", {})
+        global_overrides = global_queue_policy.get("overrides", {})
+
     normalized: List[Dict[str, Any]] = []
     for idx, job in enumerate(jobs, start=1):
         if not include_inactive and not job.get("active", False):
             continue
 
         name = str(job.get("name", "")).strip() or f"job-{idx}"
+        unknown_keys = sorted(set(job.keys()) - JOB_CONFIG_KEYS - INTERNAL_JOB_KEYS)
+        if unknown_keys:
+            unknown_text = ", ".join(unknown_keys)
+            raise ValueError(f"Job '{name}' has unknown field(s): {unknown_text}")
         path = str(job.get("path", "")).strip()
         test_steps = parse_command_steps(job.get("test", ""), "test", name)
         build_steps = parse_command_steps(job.get("build", ""), "build", name)
+        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
         interval = job.get("interval")
         at = str(job.get("at", "")).strip()
 
-        if not path:
-            raise ValueError(f"Job '{name}' is missing 'path'")
-        if not build_steps and not test_steps:
-            raise ValueError(f"Job '{name}' must define at least one of 'build' or 'test'")
+        if not build_steps and not test_steps and not cleanup_steps:
+            raise ValueError(
+                f"Job '{name}' must define at least one of 'build', 'test', or 'cleanup'"
+            )
 
         has_interval = interval not in (None, "")
         has_at = bool(at)
@@ -514,12 +707,24 @@ def normalize_jobs(
         run_mode = parse_run_mode(job.get("run-mode"), name)
         git_pull = str(job.get("git-pull", "git pull --ff-only")).strip()
         git_remote_ref = str(job.get("git-remote-ref", "@{u}")).strip()
-        cleanup_steps = parse_command_steps(job.get("cleanup", ""), "cleanup", name)
         pre_build_steps = parse_command_steps(job.get("pre-build", ""), "pre-build", name)
         post_build_steps = parse_command_steps(job.get("post-build", ""), "post-build", name)
+        run_if_steps = parse_command_steps(job.get("run-if", ""), "run-if", name)
         disable_when_run = parse_bool(
             job.get("disable-when-run", False), "disable-when-run", name
         )
+        raw_queue_mode = job.get("queue-mode")
+        if raw_queue_mode in (None, ""):
+            raw_queue_mode = job.get(
+                "__default_queue_mode",
+                global_defaults.get("queue-mode", "parallel"),
+            )
+        queue_mode = parse_queue_mode(raw_queue_mode, f"Job '{name}'")
+        if "queue-mode" in global_overrides:
+            queue_mode = parse_queue_mode(
+                global_overrides.get("queue-mode"),
+                "Global defaults.yaml overrides",
+            )
 
         if not git_pull:
             raise ValueError(f"Job '{name}' has invalid 'git-pull': {git_pull}")
@@ -532,7 +737,7 @@ def normalize_jobs(
             {
                 "name": name,
                 "slug": sanitize_name(name),
-                "path": str(Path(path).expanduser()),
+                "path": str(Path(path).expanduser()) if path else "",
                 "build_steps": build_steps,
                 "test_steps": test_steps,
                 "interval": interval_s,
@@ -541,12 +746,14 @@ def normalize_jobs(
                 "cleanup_steps": cleanup_steps,
                 "pre_build_steps": pre_build_steps,
                 "post_build_steps": post_build_steps,
+                "run_if_steps": run_if_steps,
                 "disable_when_run": disable_when_run,
                 "source_config_path": str(job.get("__source_config_path", "")).strip(),
                 "manual_install_cmd": str(job.get("manual-install-cmd", "")).strip(),
                 "git_strict": git_strict,
                 "git_pull": git_pull,
                 "git_remote_ref": git_remote_ref,
+                "queue_mode": queue_mode,
             }
         )
 
@@ -581,7 +788,10 @@ def set_group_parallelism(group: str, parallelism: int, dry_run: bool) -> None:
 
 
 def generate_build_script(job: Dict[str, Any]) -> str:
-    lines = ["set -e", f"cd {shlex.quote(job['path'])}"]
+    lines = ["set -e"]
+    job_path = str(job.get("path", "")).strip()
+    if job_path:
+        lines.append(f"cd {shlex.quote(job_path)}")
 
     cleanup_steps = parse_command_steps(
         job.get("cleanup_steps", job.get("cleanup", "")),
@@ -618,19 +828,59 @@ def generate_build_script(job: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+def run_shell_command(
+    cmd: str, cwd: Optional[str] = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("BASH_ENV", None)
     env.pop("ENV", None)
 
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-lc", cmd],
-        cwd=job["path"],
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+
+
+def run_repo_command(job: Dict[str, Any], cmd: str) -> subprocess.CompletedProcess[str]:
+    return run_shell_command(cmd, cwd=str(job["path"]))
+
+
+def evaluate_run_if(job: Dict[str, Any], dry_run: bool) -> bool:
+    name = str(job.get("name", "job"))
+    label = "[" + name + "]"
+    run_if_steps = parse_command_steps(
+        job.get("run_if_steps", job.get("run-if", "")),
+        "run-if",
+        name,
+    )
+    if not run_if_steps:
+        return True
+
+    job_path = str(job.get("path", "")).strip()
+    if dry_run:
+        for step in run_if_steps:
+            if job_path:
+                print("DRY RUN:", f"({job_path}) run-if: {step}")
+            else:
+                print("DRY RUN:", f"run-if: {step}")
+        return True
+
+    if job_path and not Path(job_path).is_dir():
+        log_event("ERROR", f"skip {label}: run-if path does not exist: {job_path}")
+        return False
+
+    for step in run_if_steps:
+        result = run_shell_command(step, cwd=job_path or None)
+        if result.returncode != 0:
+            msg = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            log_event("INFO", f"skip {label}: run-if condition returned false ({msg})")
+            return False
+
+    return True
 
 
 def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool = False) -> bool:
@@ -640,8 +890,13 @@ def prepare_repo_for_build(job: Dict[str, Any], dry_run: bool, force_run: bool =
     git_remote_ref = str(job.get("git_remote_ref", "@{u}"))
     run_mode = str(job.get("run_mode", "normal"))
     has_daily_schedule = bool(str(job.get("at", "")).strip())
+    job_path = str(job.get("path", "")).strip()
 
-    repo_path = Path(str(job["path"]))
+    if not job_path:
+        log_event("INFO", f"{label} no path configured: skipping git update checks")
+        return True
+
+    repo_path = Path(job_path)
     if not repo_path.is_dir():
         log_event("ERROR", f"skip {label}: path does not exist: {repo_path}")
         return False
@@ -952,10 +1207,10 @@ def queue_label_suffix(job: Dict[str, Any], run_once: bool, force_run: bool) -> 
     return ""
 
 
-def check_dependencies() -> None:
+def check_dependencies(require_git: bool = True) -> None:
     pueue_cmd = get_pueue_cmd()
     log_event("INFO", f"using pueue executable: {pueue_cmd}")
-    if shutil.which("git") is None:
+    if require_git and shutil.which("git") is None:
         raise RuntimeError("git is not installed or not in PATH")
 
 
@@ -972,6 +1227,7 @@ def run_loop(
     at_error_retry_seconds: int = DEFAULT_AT_ERROR_RETRY_SECONDS,
     job_name_filter: Optional[str] = None,
     disable_when_run: bool = False,
+    global_defaults_config_path: Optional[Path] = None,
 ) -> int:
     if reload_config_seconds < 0:
         raise ValueError("reload-config-seconds must be >= 0")
@@ -1003,11 +1259,28 @@ def run_loop(
             print("No active jobs found for scheduled run mode.")
         return 0
 
-    shared_group = group_prefix
     cpu_threads = max(1, os.cpu_count() or 1)
-    ensure_pueue_group(shared_group, dry_run=dry_run)
-    set_group_parallelism(shared_group, parallelism=cpu_threads, dry_run=dry_run)
-    log_event("INFO", f"configured pueue group '{shared_group}' parallelism to {cpu_threads}")
+    parallel_group = group_prefix
+    serial_group = f"{group_prefix}-serial"
+
+    queue_modes_in_use = {
+        parse_queue_mode(job.get("queue_mode", "parallel"), f"Job '{job.get('name', 'job')}'")
+        for job in mode_eligible_jobs
+    }
+    if "parallel" in queue_modes_in_use:
+        ensure_pueue_group(parallel_group, dry_run=dry_run)
+        set_group_parallelism(parallel_group, parallelism=cpu_threads, dry_run=dry_run)
+        log_event(
+            "INFO",
+            f"configured pueue group '{parallel_group}' parallelism to {cpu_threads}",
+        )
+    if "serial" in queue_modes_in_use:
+        ensure_pueue_group(serial_group, dry_run=dry_run)
+        set_group_parallelism(serial_group, parallelism=1, dry_run=dry_run)
+        log_event(
+            "INFO",
+            f"configured pueue group '{serial_group}' parallelism to 1",
+        )
 
     now = time.time()
     next_runs: Dict[str, float] = {}
@@ -1038,9 +1311,25 @@ def run_loop(
                 previous_jobs_by_slug = {
                     str(job.get("slug", "")): job for job in mode_eligible_jobs
                 }
-                reloaded_jobs = normalize_jobs(merge_jobs_from_configs(config_paths))
                 if job_name_filter:
-                    reloaded_jobs = filter_jobs_by_name(reloaded_jobs, job_name_filter)
+                    reloaded_raw_jobs = filter_jobs_by_name(
+                        merge_jobs_from_configs(config_paths),
+                        job_name_filter,
+                    )
+                else:
+                    reloaded_raw_jobs = merge_jobs_from_configs(config_paths)
+                reloaded_global_policy: Optional[Dict[str, Dict[str, str]]] = None
+                if (
+                    global_defaults_config_path is not None
+                    and global_defaults_config_path.is_file()
+                ):
+                    reloaded_global_policy = load_global_defaults_policy(
+                        global_defaults_config_path
+                    )
+                reloaded_jobs = normalize_jobs(
+                    reloaded_raw_jobs,
+                    global_queue_policy=reloaded_global_policy,
+                )
 
                 mode_eligible_jobs = [
                     job
@@ -1087,13 +1376,27 @@ def run_loop(
                 continue
 
             try:
+                if not evaluate_run_if(job, dry_run=dry_run):
+                    if job.get("at"):
+                        next_runs[job["slug"]] = next_daily_at_timestamp(
+                            str(job["at"]), loop_now + 1
+                        )
+                    else:
+                        next_runs[job["slug"]] = loop_now + int(job["interval"])
+                    continue
+
                 if prepare_repo_for_build(job, dry_run=dry_run, force_run=force_run):
                     should_disable_when_run = bool(job.get("disable_when_run", False)) or disable_when_run
                     if should_disable_when_run:
                         disable_job_in_source_config(job, dry_run=dry_run)
+                    queue_mode = parse_queue_mode(
+                        job.get("queue_mode", "parallel"),
+                        f"Job '{job.get('name', 'job')}'",
+                    )
+                    target_group = serial_group if queue_mode == "serial" else parallel_group
                     task_id = queue_job(
                         job,
-                        group=shared_group,
+                        group=target_group,
                         dry_run=dry_run,
                         label_suffix=queue_label_suffix(job, run_once=run_once, force_run=force_run),
                     )
@@ -1168,13 +1471,13 @@ def validate_config_file(config_path: Path) -> List[Dict[str, Any]]:
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run periodic pueue build tasks from gfff.yaml"
+        description="Run periodic pueue build tasks from YAML config files"
     )
     parser.add_argument(
         "-c",
         "--config",
         default=None,
-        help="Path to a gfff yaml config file. When omitted, auto-discovery is used.",
+        help="Path to a config YAML file. When omitted, auto-discovery is used.",
     )
     parser.add_argument(
         "-g",
@@ -1246,7 +1549,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Path to development fallback config used by default config discovery "
-            "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/gfff.yaml)"
+            "(default: auto-detected from service ExecStart --config, then ~/dev/gfff/global.yaml)"
         ),
     )
     parser.add_argument(
@@ -1342,23 +1645,31 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 0
 
-        check_dependencies()
         config_paths: List[Path]
+        dev_fallback_config = (
+            Path(args.dev_fallback_config).expanduser().resolve()
+            if args.dev_fallback_config
+            else None
+        )
         if args.config:
-            config_paths = [Path(args.config).expanduser().resolve()]
-        else:
-            dev_fallback_config = (
-                Path(args.dev_fallback_config).expanduser().resolve()
-                if args.dev_fallback_config
-                else None
+            explicit_config_path = Path(args.config).expanduser().resolve()
+            config_paths = [explicit_config_path]
+            discovered_paths = discover_default_config_paths(
+                include_dev_fallback=not args.no_dev_fallback,
+                dev_fallback_config=dev_fallback_config,
             )
+            for discovered_path in discovered_paths:
+                if discovered_path not in config_paths:
+                    config_paths.append(discovered_path)
+        else:
             config_paths = discover_default_config_paths(
                 include_dev_fallback=not args.no_dev_fallback,
                 dev_fallback_config=dev_fallback_config,
             )
             if not config_paths:
                 raise RuntimeError(
-                    "No config found. Searched: ./gfff.yaml, ~/.config/gfff/gfff.yaml"
+                    "No config found. Searched: ~/.config/gfff/gfff.yaml, "
+                    "./global.yaml (fallback ./gfff.yaml)"
                     + (
                         ""
                         if args.no_dev_fallback
@@ -1378,17 +1689,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         for config_path in config_paths:
             log_event("INFO", f"using config: {config_path}")
 
-        jobs = normalize_jobs(
-            merge_jobs_from_configs(config_paths),
-            include_inactive=(args.once and args.force),
-        )
+        global_defaults_config_path = default_global_defaults_config_path()
+        global_queue_policy: Optional[Dict[str, Dict[str, str]]] = None
+        if global_defaults_config_path.is_file():
+            global_queue_policy = load_global_defaults_policy(
+                global_defaults_config_path
+            )
+            log_event(
+                "INFO",
+                "using global defaults policy: " + str(global_defaults_config_path),
+            )
+
         if args.job_name:
-            jobs = filter_jobs_by_name(jobs, args.job_name)
-            if not jobs:
+            raw_jobs = filter_jobs_by_name(
+                merge_jobs_from_configs(config_paths), args.job_name
+            )
+            if not raw_jobs:
                 raise RuntimeError(
                     f"No active job matched name: {args.job_name}. "
                     "Config files were loaded in normal discovery order."
                 )
+            jobs = normalize_jobs(
+                raw_jobs,
+                include_inactive=(args.once and args.force),
+                global_queue_policy=global_queue_policy,
+            )
+        else:
+            jobs = normalize_jobs(
+                merge_jobs_from_configs(config_paths),
+                include_inactive=(args.once and args.force),
+                global_queue_policy=global_queue_policy,
+            )
+        check_dependencies(
+            require_git=any(str(job.get("path", "")).strip() for job in jobs)
+        )
         return run_loop(
             jobs=jobs,
             group_prefix=args.group_prefix,
@@ -1402,6 +1736,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             at_error_retry_seconds=args.at_error_retry_seconds,
             job_name_filter=args.job_name,
             disable_when_run=args.disable_when_run,
+            global_defaults_config_path=global_defaults_config_path,
         )
     except KeyboardInterrupt:
         print("Interrupted.")

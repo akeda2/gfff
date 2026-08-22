@@ -3,7 +3,7 @@ import datetime as dt
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +11,7 @@ import buildbot
 from buildbot import (
     CONFIG_FILENAME,
     check_dependencies,
+    default_global_defaults_config_path,
     disable_job_in_source_config,
     discover_default_config_paths,
     extract_done_result,
@@ -19,11 +20,13 @@ from buildbot import (
     generate_build_script,
     load_yaml_config,
     log_finished_task_outcomes,
+    load_global_defaults_policy,
     merge_jobs_from_configs,
     normalize_jobs,
     next_run_for_daily_job,
     normalize_task_result,
     next_daily_at_timestamp,
+    evaluate_run_if,
     is_job_mode_eligible,
     parse_run_mode,
     parse_config_path_from_service,
@@ -96,7 +99,40 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["test_steps"], ["echo t1", "echo t2"])
         self.assertEqual(jobs[0]["build_steps"], ["echo b1", "echo b2"])
 
-    def test_rejects_job_without_test_and_build(self) -> None:
+    def test_allows_cleanup_only_job(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "cleanup-only",
+                    "active": True,
+                    "path": "~/repo",
+                    "cleanup": "git clean -fdx",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["cleanup_steps"], ["git clean -fdx"])
+        self.assertEqual(jobs[0]["test_steps"], [])
+        self.assertEqual(jobs[0]["build_steps"], [])
+
+    def test_allows_job_without_path(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-install",
+                    "active": True,
+                    "build": "npm install -g foo",
+                    "interval": 60,
+                }
+            ]
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["path"], "")
+
+    def test_rejects_job_without_test_build_or_cleanup(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             normalize_jobs(
                 [
@@ -109,7 +145,7 @@ class NormalizeJobsTests(unittest.TestCase):
                 ]
             )
 
-        self.assertIn("at least one of 'build' or 'test'", str(ctx.exception))
+        self.assertIn("at least one of 'build', 'test', or 'cleanup'", str(ctx.exception))
 
     def test_rejects_invalid_interval(self) -> None:
         with self.assertRaises(ValueError):
@@ -194,6 +230,136 @@ class NormalizeJobsTests(unittest.TestCase):
         self.assertEqual(jobs[0]["git_pull"], "git pull --ff-only")
         self.assertEqual(jobs[0]["git_remote_ref"], "@{u}")
         self.assertTrue(jobs[0]["git_strict"])
+        self.assertEqual(jobs[0]["queue_mode"], "parallel")
+
+    def test_accepts_serial_queue_mode(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "serial-mode",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "queue-mode": "serial",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_rejects_invalid_queue_mode(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "invalid-mode",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "queue-mode": "sometimes",
+                    }
+                ]
+            )
+        self.assertIn("invalid 'queue-mode'", str(ctx.exception))
+
+    def test_rejects_unknown_job_field(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            normalize_jobs(
+                [
+                    {
+                        "name": "unknown-field",
+                        "active": True,
+                        "path": "~/repo",
+                        "build": "make",
+                        "interval": 60,
+                        "runmode": "scheduled",
+                    }
+                ]
+            )
+        self.assertIn("unknown field(s): runmode", str(ctx.exception))
+
+    def test_allows_comment_field_and_ignores_it(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "has-comment",
+                    "comment": "human note only",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["name"], "has-comment")
+        self.assertNotIn("comment", jobs[0])
+
+    def test_uses_file_default_queue_mode(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaulted-serial",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "serial",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_job_queue_mode_overrides_file_default(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "override",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "serial",
+                    "queue-mode": "parallel",
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "parallel")
+
+    def test_global_defaults_queue_mode_applies_when_job_and_file_defaults_missing(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-default",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ],
+            global_queue_policy={"defaults": {"queue-mode": "serial"}, "overrides": {}},
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
+
+    def test_global_overrides_queue_mode_wins_over_job_and_file_defaults(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "global-force",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "__default_queue_mode": "parallel",
+                    "queue-mode": "parallel",
+                }
+            ],
+            global_queue_policy={
+                "defaults": {"queue-mode": "parallel"},
+                "overrides": {"queue-mode": "serial"},
+            },
+        )
+        self.assertEqual(jobs[0]["queue_mode"], "serial")
 
     def test_supports_pre_and_post_build_as_lists(self) -> None:
         jobs = normalize_jobs(
@@ -301,6 +467,45 @@ class NormalizeJobsTests(unittest.TestCase):
 
         self.assertTrue(jobs[0]["disable_when_run"])
 
+    def test_run_if_defaults_to_empty_steps(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "defaults",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+        )
+        self.assertEqual(jobs[0]["run_if_steps"], [])
+
+    def test_run_if_accepts_string_and_list(self) -> None:
+        jobs = normalize_jobs(
+            [
+                {
+                    "name": "string",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "run-if": "test -f .ready",
+                },
+                {
+                    "name": "list",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "run-if": ["test -f .ready", "test -n \"$HOME\""],
+                },
+            ]
+        )
+
+        self.assertEqual(jobs[0]["run_if_steps"], ["test -f .ready"])
+        self.assertEqual(jobs[1]["run_if_steps"], ["test -f .ready", "test -n \"$HOME\""])
+
 
 class GenerateBuildScriptTests(unittest.TestCase):
     def test_runs_test_before_build(self) -> None:
@@ -338,6 +543,18 @@ class GenerateBuildScriptTests(unittest.TestCase):
 
         script = generate_build_script(job)
         self.assertEqual(script.splitlines(), ["set -e", "cd '~/repo'", "pytest -q"])
+
+    def test_skips_cd_when_path_missing(self) -> None:
+        job = {
+            "cleanup": "",
+            "pre_build": "",
+            "test": "npm update -g npm",
+            "build": "",
+            "post_build": "",
+        }
+
+        script = generate_build_script(job)
+        self.assertEqual(script.splitlines(), ["set -e", "npm update -g npm"])
 
     def test_supports_multiple_pre_and_post_build_steps(self) -> None:
         job = {
@@ -445,6 +662,28 @@ class PrimitiveFunctionTests(unittest.TestCase):
         self.assertEqual(parse_run_mode("SCHEDULED", "job"), "scheduled")
         with self.assertRaises(ValueError):
             parse_run_mode("bad", "job")
+
+    def test_evaluate_run_if_defaults_true(self) -> None:
+        self.assertTrue(evaluate_run_if({"name": "job"}, dry_run=False))
+
+    def test_evaluate_run_if_returns_false_on_failed_step(self) -> None:
+        job = {"name": "job", "run_if_steps": ["test -f missing.txt"]}
+        with patch.object(buildbot, "run_shell_command", return_value=cp(returncode=1, stderr="nope")):
+            self.assertFalse(evaluate_run_if(job, dry_run=False))
+
+    def test_evaluate_run_if_runs_steps_in_order(self) -> None:
+        job = {
+            "name": "job",
+            "path": "/tmp",
+            "run_if_steps": ["test -f .ready", "test -n \"$HOME\""],
+        }
+        with patch.object(buildbot, "run_shell_command", side_effect=[cp(), cp()]) as run_mock:
+            self.assertTrue(evaluate_run_if(job, dry_run=False))
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(run_mock.call_args_list[0].args, ("test -f .ready",))
+        self.assertEqual(run_mock.call_args_list[0].kwargs, {"cwd": "/tmp"})
+        self.assertEqual(run_mock.call_args_list[1].args, ("test -n \"$HOME\"",))
+        self.assertEqual(run_mock.call_args_list[1].kwargs, {"cwd": "/tmp"})
 
     def test_disable_job_in_source_config_flips_active_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,6 +820,27 @@ class PrimitiveFunctionTests(unittest.TestCase):
 
         log_mock.assert_any_call("INFO", f"using pueue executable: {str(pueue)}")
 
+    def test_check_dependencies_can_skip_git_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cargo_bin = home / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True, exist_ok=True)
+            pueue = cargo_bin / "pueue"
+            pueue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            pueue.chmod(0o755)
+
+            def which_side_effect(binary: str):
+                if binary == "pueue":
+                    return None
+                if binary == "git":
+                    return None
+                return None
+
+            with patch.object(buildbot, "_PUEUE_CMD_CACHE", None):
+                with patch.object(buildbot.Path, "home", return_value=home):
+                    with patch.object(buildbot.shutil, "which", side_effect=which_side_effect):
+                        check_dependencies(require_git=False)
+
 
 class LoadYamlConfigTests(unittest.TestCase):
     def test_rejects_non_list_yaml(self) -> None:
@@ -597,6 +857,75 @@ class LoadYamlConfigTests(unittest.TestCase):
             data = load_yaml_config(path)
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["name"], "x")
+
+    def test_reads_valid_yaml_object_with_defaults_and_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ok-object.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs:\n"
+                "- name: x\n"
+                "  active: true\n"
+                "  path: ~/repo\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+            data = load_yaml_config(path)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["name"], "x")
+
+    def test_rejects_object_without_jobs_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-object.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("top-level 'jobs' list", str(ctx.exception))
+
+    def test_rejects_invalid_defaults_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-defaults.yaml"
+            path.write_text(
+                "defaults: serial\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Expected 'defaults' to be a mapping", str(ctx.exception))
+
+    def test_rejects_unknown_defaults_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-defaults-key.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Unknown defaults key(s)", str(ctx.exception))
+
+    def test_rejects_unknown_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-top-level.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs: []\n"
+                "runmode: scheduled\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml_config(path)
+        self.assertIn("Unknown top-level config key(s)", str(ctx.exception))
 
     def test_reports_invalid_yaml_with_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,8 +945,62 @@ class LoadYamlConfigTests(unittest.TestCase):
         self.assertIn("column", msg)
 
 
+class GlobalDefaultsPolicyTests(unittest.TestCase):
+    def test_default_global_defaults_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            with patch.object(buildbot.Path, "home", return_value=home):
+                path = default_global_defaults_config_path()
+        self.assertEqual(path, (home / ".config" / "gfff" / "defaults.yaml").resolve())
+
+    def test_load_global_defaults_policy_defaults_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "overrides:\n"
+                "  queue-mode: parallel\n",
+                encoding="utf-8",
+            )
+            policy = load_global_defaults_policy(path)
+
+        self.assertEqual(
+            policy,
+            {
+                "defaults": {"queue-mode": "serial"},
+                "overrides": {"queue-mode": "parallel"},
+            },
+        )
+
+    def test_load_global_defaults_policy_rejects_unknown_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults: {}\n"
+                "jobs: []\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_global_defaults_policy(path)
+        self.assertIn("Unknown top-level defaults.yaml key(s)", str(ctx.exception))
+
+    def test_load_global_defaults_policy_rejects_unknown_layer_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "defaults.yaml"
+            path.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_global_defaults_policy(path)
+        self.assertIn("Unknown defaults.yaml defaults", str(ctx.exception))
+
+
 class ConfigDiscoveryTests(unittest.TestCase):
-    def test_discovery_order_cwd_then_user_then_dev(self) -> None:
+    def test_discovery_order_user_then_cwd_then_dev(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             cwd = Path(tmp) / "cwd"
@@ -639,7 +1022,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 with patch.object(buildbot.Path, "cwd", return_value=cwd):
                     paths = discover_default_config_paths()
 
-            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve(), dev_config.resolve()])
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve(), dev_config.resolve()])
 
     def test_dev_config_stays_last_when_cwd_is_dev_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -682,7 +1065,27 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 with patch.object(buildbot.Path, "cwd", return_value=cwd):
                     paths = discover_default_config_paths(include_dev_fallback=False)
 
-            self.assertEqual(paths, [cwd_config.resolve(), user_config.resolve()])
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
+
+    def test_discovery_uses_legacy_cwd_config_when_global_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text("[]\n", encoding="utf-8")
+
+            legacy_cwd_config = cwd / "gfff.yaml"
+            legacy_cwd_config.write_text("[]\n", encoding="utf-8")
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+
+            self.assertEqual(paths, [user_config.resolve(), legacy_cwd_config.resolve()])
 
     def test_custom_dev_fallback_path_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -781,11 +1184,13 @@ class ConfigDiscoveryTests(unittest.TestCase):
             primary = user_dir / "gfff.yaml"
             first = user_dir / "10firstlist.yaml"
             second = user_dir / "30secondlist.yaml"
+            global_defaults = user_dir / "defaults.yaml"
             ignored = user_dir / "notes.txt"
 
             primary.write_text("[]\n", encoding="utf-8")
             first.write_text("[]\n", encoding="utf-8")
             second.write_text("[]\n", encoding="utf-8")
+            global_defaults.write_text("defaults:\n  queue-mode: serial\n", encoding="utf-8")
             ignored.write_text("ignore\n", encoding="utf-8")
 
             with patch.object(buildbot.Path, "home", return_value=home):
@@ -817,6 +1222,54 @@ class ConfigMergeTests(unittest.TestCase):
             merged = merge_jobs_from_configs([first, second])
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["path"], "~/repo/a")
+
+    def test_local_user_config_wins_over_cwd_on_name_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "cwd"
+            home.mkdir(parents=True, exist_ok=True)
+            cwd.mkdir(parents=True, exist_ok=True)
+
+            user_config = home / ".config" / "gfff" / "gfff.yaml"
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            user_config.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/local\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            cwd_config = cwd / CONFIG_FILENAME
+            cwd_config.write_text(
+                "- name: same\n  active: true\n  path: ~/repo/global\n  build: make\n  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot.Path, "cwd", return_value=cwd):
+                    paths = discover_default_config_paths(include_dev_fallback=False)
+                    merged = merge_jobs_from_configs(paths)
+
+            self.assertEqual(paths, [user_config.resolve(), cwd_config.resolve()])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["path"], "~/repo/local")
+
+    def test_merge_applies_file_default_queue_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "object.yaml"
+            cfg.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n"
+                "jobs:\n"
+                "- name: same\n"
+                "  active: true\n"
+                "  path: ~/repo/a\n"
+                "  build: make\n"
+                "  interval: 60\n",
+                encoding="utf-8",
+            )
+
+            merged = merge_jobs_from_configs([cfg])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["__default_queue_mode"], "serial")
 
 
 class TaskResultHelpersTests(unittest.TestCase):
@@ -931,6 +1384,13 @@ class LogFinishedTaskOutcomesTests(unittest.TestCase):
 
 
 class PrepareRepoForBuildTests(unittest.TestCase):
+    def test_returns_true_and_skips_git_when_path_missing(self) -> None:
+        job = {"name": "global-install"}
+        with patch.object(buildbot, "run_repo_command") as run_repo_mock:
+            ok = prepare_repo_for_build(job, dry_run=False)
+        self.assertTrue(ok)
+        run_repo_mock.assert_not_called()
+
     def test_returns_false_when_path_missing(self) -> None:
         job = {"name": "repo", "path": "/definitely/missing/path"}
         with patch.object(buildbot, "log_event") as log_mock:
@@ -1182,6 +1642,100 @@ class JobNameFilterTests(unittest.TestCase):
 
 
 class RunLoopTests(unittest.TestCase):
+    def test_serial_job_queues_to_shared_serial_group(self) -> None:
+        jobs = [
+            {
+                "name": "serial",
+                "slug": "serial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "serial",
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group") as ensure_mock:
+            with patch.object(buildbot, "set_group_parallelism") as parallelism_mock:
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                rc = run_loop(
+                                    jobs=jobs,
+                                    group_prefix="gfff",
+                                    tick=1,
+                                    dry_run=False,
+                                    run_once=True,
+                                    force_run=True,
+                                )
+
+        self.assertEqual(rc, 0)
+        ensure_mock.assert_called_once_with("gfff-serial", dry_run=False)
+        parallelism_mock.assert_called_once_with("gfff-serial", parallelism=1, dry_run=False)
+        queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.kwargs["group"], "gfff-serial")
+
+    def test_mixed_queue_modes_configure_parallel_and_serial_groups(self) -> None:
+        jobs = [
+            {
+                "name": "parallel",
+                "slug": "parallel",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "parallel",
+                "manual_install_cmd": "",
+            },
+            {
+                "name": "serial",
+                "slug": "serial",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "queue_mode": "serial",
+                "manual_install_cmd": "",
+            },
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group") as ensure_mock:
+            with patch.object(buildbot, "set_group_parallelism") as parallelism_mock:
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "prepare_repo_for_build", return_value=True):
+                            with patch.object(buildbot, "queue_job", return_value=None):
+                                with patch.object(buildbot.os, "cpu_count", return_value=8):
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                    )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            ensure_mock.call_args_list,
+            [
+                unittest.mock.call("gfff", dry_run=False),
+                unittest.mock.call("gfff-serial", dry_run=False),
+            ],
+        )
+        self.assertEqual(
+            parallelism_mock.call_args_list,
+            [
+                unittest.mock.call("gfff", parallelism=8, dry_run=False),
+                unittest.mock.call("gfff-serial", parallelism=1, dry_run=False),
+            ],
+        )
+
     def test_interval_job_runtime_error_retries_soon(self) -> None:
         jobs = [
             {
@@ -1327,6 +1881,42 @@ class RunLoopTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(events, ["disable", "queue"])
+
+    def test_run_if_false_skips_before_repo_prepare_and_queue(self) -> None:
+        jobs = [
+            {
+                "name": "guarded",
+                "slug": "guarded",
+                "path": "/tmp",
+                "build": "make",
+                "test": "",
+                "interval": 60,
+                "at": "",
+                "run_if_steps": ["test -f .ready"],
+                "manual_install_cmd": "",
+            }
+        ]
+
+        with patch.object(buildbot, "ensure_pueue_group"):
+            with patch.object(buildbot, "set_group_parallelism"):
+                with patch.object(buildbot, "get_pueue_status", return_value={"tasks": {}}):
+                    with patch.object(buildbot, "log_finished_task_outcomes"):
+                        with patch.object(buildbot, "evaluate_run_if", return_value=False) as run_if_mock:
+                            with patch.object(buildbot, "prepare_repo_for_build", return_value=True) as prep_mock:
+                                with patch.object(buildbot, "queue_job", return_value=None) as queue_mock:
+                                    rc = run_loop(
+                                        jobs=jobs,
+                                        group_prefix="gfff",
+                                        tick=1,
+                                        dry_run=False,
+                                        run_once=True,
+                                        force_run=True,
+                                    )
+
+        self.assertEqual(rc, 0)
+        run_if_mock.assert_called_once()
+        prep_mock.assert_not_called()
+        queue_mock.assert_not_called()
 
     def test_once_force_queues_at_job_immediately(self) -> None:
         jobs = [
@@ -1775,6 +2365,165 @@ class MainCheckImportTests(unittest.TestCase):
         queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
         self.assertEqual(len(queued_jobs), 1)
         self.assertEqual(queued_jobs[0]["name"], "inactive-on-purpose")
+
+    def test_main_with_config_prepends_explicit_before_discovered_paths(self) -> None:
+        explicit = Path("/tmp/explicit.yaml")
+        user = Path("/tmp/user.yaml")
+        cwd = Path("/tmp/cwd.yaml")
+
+        with patch.object(buildbot, "check_dependencies"):
+            with patch.object(buildbot, "discover_default_config_paths", return_value=[user, cwd]):
+                with patch.object(buildbot, "merge_jobs_from_configs", return_value=[]) as merge_mock:
+                    with patch.object(buildbot, "run_loop", return_value=0):
+                        rc = buildbot.main(["--config", str(explicit)])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            merge_mock.call_args.args[0],
+            [explicit.resolve(), user, cwd],
+        )
+
+    def test_main_with_job_name_filters_before_normalize(self) -> None:
+        config_path = Path("/tmp/a.yaml")
+        raw_jobs = [
+            {
+                "name": "broken-other-job",
+                "active": True,
+                "build": "make",
+                "interval": 60,
+            },
+            {
+                "name": "fresh-cleanup",
+                "active": True,
+                "path": "~/repo",
+                "cleanup": "git clean -fdx",
+                "interval": 60,
+            },
+        ]
+
+        with patch.object(buildbot, "check_dependencies"):
+            with patch.object(buildbot, "discover_default_config_paths", return_value=[config_path]):
+                with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                    with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                        rc = buildbot.main(["--once", "--force", "fresh-cleanup"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(len(queued_jobs), 1)
+        self.assertEqual(queued_jobs[0]["name"], "fresh-cleanup")
+
+    def test_main_applies_global_defaults_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "defaults:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "global-defaulted",
+                    "active": True,
+                    "path": "~/repo",
+                    "cleanup": "git clean -fdx",
+                    "interval": 60,
+                }
+            ]
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot, "check_dependencies"):
+                    with patch.object(
+                        buildbot, "discover_default_config_paths", return_value=[config_path]
+                    ):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                            with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(queued_jobs[0]["queue_mode"], "serial")
+        self.assertEqual(
+            run_loop_mock.call_args.kwargs["global_defaults_config_path"],
+            defaults_cfg.resolve(),
+        )
+
+    def test_main_applies_global_overrides_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "overrides:\n"
+                "  queue-mode: serial\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "global-override",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                    "queue-mode": "parallel",
+                }
+            ]
+
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with patch.object(buildbot, "check_dependencies"):
+                    with patch.object(
+                        buildbot, "discover_default_config_paths", return_value=[config_path]
+                    ):
+                        with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                            with patch.object(buildbot, "run_loop", return_value=0) as run_loop_mock:
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 0)
+        queued_jobs = run_loop_mock.call_args.kwargs["jobs"]
+        self.assertEqual(queued_jobs[0]["queue_mode"], "serial")
+
+    def test_main_rejects_invalid_global_defaults_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            defaults_cfg = home / ".config" / "gfff" / "defaults.yaml"
+            defaults_cfg.parent.mkdir(parents=True, exist_ok=True)
+            defaults_cfg.write_text(
+                "defaults:\n"
+                "  runmode: scheduled\n",
+                encoding="utf-8",
+            )
+
+            config_path = Path("/tmp/a.yaml")
+            raw_jobs = [
+                {
+                    "name": "x",
+                    "active": True,
+                    "path": "~/repo",
+                    "build": "make",
+                    "interval": 60,
+                }
+            ]
+
+            err = io.StringIO()
+            with patch.object(buildbot.Path, "home", return_value=home):
+                with redirect_stderr(err):
+                    with patch.object(buildbot, "check_dependencies"):
+                        with patch.object(
+                            buildbot, "discover_default_config_paths", return_value=[config_path]
+                        ):
+                            with patch.object(buildbot, "merge_jobs_from_configs", return_value=raw_jobs):
+                                rc = buildbot.main(["--once", "--force"])
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Unknown defaults.yaml defaults", err.getvalue())
 
     def test_check_validates_and_exits_without_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

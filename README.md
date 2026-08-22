@@ -10,7 +10,7 @@ Simple build scheduler
 bash install-buildbot.sh
 ```
 
-2. Put job configs in `~/.config/gfff/` (or keep `./gfff.yaml` for local runs).
+2. Put job configs in `~/.config/gfff/` (or keep `./global.yaml` for local/development runs).
 
 3. Validate config:
 
@@ -33,11 +33,16 @@ journalctl --user -u gfff-buildbot.service -f
 
 ## Python Buildbot
 
-`gfff-buildbot` reads active entries from `gfff.yaml` and schedules one recurring
-shared `pueue` group for all projects.
+`gfff-buildbot` reads active entries from configured YAML files and schedules recurring
+jobs into shared `pueue` groups.
 
-On startup, `gfff-buildbot` sets the `gfff` pueue group parallelism to the
-detected CPU thread count.
+By default, jobs use `queue-mode: parallel` and run in the shared `gfff` group.
+When a job uses `queue-mode: serial`, it is routed to a shared `gfff-serial`
+group that runs one task at a time.
+
+On startup, `gfff-buildbot` sets:
+- `gfff` group parallelism to detected CPU thread count
+- `gfff-serial` group parallelism to `1` (when serial jobs are present)
 
 You can still adjust concurrency with pueue commands (globally or for the
 selected group) based on your machine capacity.
@@ -55,8 +60,9 @@ pueue parallel -g gfff 4
 pueue parallel 8
 ```
 
-Before queueing a build, the internal scheduler process does:
+Before queueing a build, when a job has `path` configured, the internal scheduler process does:
 
+0. optional `run-if` condition check (if configured)
 1. `git fetch`
 2. compare local head with configured `git-remote-ref` (default `@{u}`)
 3. if changed: run configured `git-pull` (default `git pull --ff-only`)
@@ -102,9 +108,20 @@ Optional per-job run mode:
 - `run-mode: manual`: run only when invoked manually with `--once`
 - `run-mode: scheduled`: run in scheduler mode (`at`/`interval` loop). It is skipped by plain `--once`, but allowed with `--once <job-name>` when explicitly targeted.
 
+Optional per-job queue mode:
+
+- `queue-mode: parallel` (default when omitted): route to shared `gfff` group
+- `queue-mode: serial`: route to shared `gfff-serial` group (1 task at a time)
+
 Optional per-job one-shot deactivation:
 
 - `disable-when-run: true`: before running `test`/`build`, flip that job's `active: true` to `active: false` in the source config file where the job was loaded from.
+
+Optional per-job conditional gate:
+
+- `run-if`: command string (or list of commands) run by the service before git checks and queueing.
+  - if every command exits `0`, the job continues normally
+  - if any command exits non-zero, the job is skipped for that run
 
 Logging now includes:
 
@@ -183,9 +200,15 @@ Scheduled-only example (skipped by plain `--once`, but can be targeted with `gb 
 	at: 04:00
 ```
 
-At least one of `test` or `build` must be set for an active job.
+`path` is optional. If omitted, git update checks are skipped and build/test/cleanup
+commands run without a repository `cd`.
+
+At least one of `cleanup`, `test`, or `build` must be set for an active job.
 Exactly one of `interval` or `at` must be set for an active job.
 If `run-mode` is omitted, behavior is unchanged from previous versions.
+If `queue-mode` is omitted, behavior defaults to `parallel`.
+Optional `comment` is accepted as a no-op note field and ignored at runtime.
+Unknown config keys are rejected during `--check` and `--import` validation (for example `runmode` is invalid; use `run-mode`).
 
 ### Requirements
 
@@ -259,13 +282,58 @@ gfff-buildbot
 
 ### Config Discovery
 
-If `--config` is not provided, `gfff-buildbot` searches and merges configs in this order:
+`gfff-buildbot` merges configs in this order:
 
-1. `./gfff.yaml` (current directory)
+1. explicit `--config /path/to/config.yaml` (if provided)
 2. local user config directory `~/.config/gfff/`:
-	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`)
-3. development fallback config from user service `ExecStart --config` (if available)
-4. `~/dev/gfff/gfff.yaml` (final fallback if service does not define a config path)
+	first `gfff.yaml`, then other `*.yaml` files in lexical order (for example `10firstlist.yaml`, `30secondlist.yaml`), excluding reserved `defaults.yaml`
+3. `./global.yaml` (current directory; legacy fallback: `./gfff.yaml`)
+4. development fallback config from user service `ExecStart --config` (if available)
+5. `~/dev/gfff/global.yaml` (legacy fallback: `~/dev/gfff/gfff.yaml`)
+
+Each config file may use either format:
+
+1. top-level list of jobs (existing format)
+2. top-level object with optional defaults:
+
+```yaml
+defaults:
+  queue-mode: serial
+jobs:
+  - name: repo-a
+    active: true
+    path: ~/dev/repo-a
+    build: make
+    interval: 60
+  - name: repo-b
+    active: true
+    path: ~/dev/repo-b
+    build: make
+    interval: 60
+    queue-mode: parallel
+```
+
+Queue-mode precedence is:
+- `~/.config/gfff/defaults.yaml` `overrides.queue-mode` (force override)
+- per-job `queue-mode`
+- file-level `defaults.queue-mode`
+- `~/.config/gfff/defaults.yaml` `defaults.queue-mode` (fallback)
+- implicit default `parallel`
+
+Optional host-wide policy file:
+
+```yaml
+# ~/.config/gfff/defaults.yaml
+defaults:
+  queue-mode: serial    # fallback only
+overrides:
+  queue-mode: parallel  # force override, even when jobs set queue-mode explicitly
+```
+
+Notes:
+- `defaults.yaml` is optional.
+- In this first version, only `queue-mode` is supported in `defaults.yaml`.
+- Unknown keys in `defaults.yaml` are rejected.
 
 The shipped user service intentionally starts in `%h` (home) and does not pass
 `--config`, so `~/.config/gfff/*.yaml` is used by default while `~/dev/gfff/gfff.yaml`
@@ -299,7 +367,7 @@ This makes `~/.config/gfff/` the recommended place for user-local defaults and l
 Optional flags for discovery behavior:
 
 - `--no-dev-fallback`: ignore the development fallback config in auto-discovery.
-- `--dev-fallback-config /path/to/gfff.yaml`: use a custom development fallback config path instead of `~/dev/gfff/gfff.yaml`.
+- `--dev-fallback-config /path/to/config.yaml`: use a custom development fallback config path instead of `~/dev/gfff/global.yaml`.
 
 Direct venv path also works:
 
