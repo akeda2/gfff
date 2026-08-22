@@ -167,6 +167,36 @@ Multi-step hook example:
 	interval: 3600
 ```
 
+Full-field interval example (shows every per-job field except `at`; see daily example below for `at`):
+
+```yaml
+- name: full-field-job
+	comment: "Build and package when release branch advances"
+	active: true
+	path: ~/dev/full-field-job
+	cleanup:
+	  - git clean -fdx
+	pre-build:
+	  - ./scripts/bootstrap.sh
+	run-if:
+	  - test -f pyproject.toml
+	  - test -x ./scripts/bootstrap.sh
+	test:
+	  - pytest -q
+	build:
+	  - make release
+	post-build:
+	  - ./scripts/publish-artifacts.sh
+	interval: 1800
+	run-mode: normal
+	disable-when-run: false
+	manual-install-cmd: sudo make install
+	git-strict: false
+	git-pull: git pull origin release --ff-only
+	git-remote-ref: origin/release
+	queue-mode: serial
+```
+
 Daily schedule example:
 
 ```yaml
@@ -470,6 +500,82 @@ then queues the run even when no updates were found.
 When used with `--once`, it also bypasses the `active: false` filter and includes
 inactive config entries in that one-shot run.
 This is intended for interactive/manual triggering.
+
+### CLI option reference
+
+All supported command-line options:
+
+| Option | Type / default | Description |
+|---|---|---|
+| `-c`, `--config` | path, default: auto-discovery | Use one explicit config file instead of discovery. |
+| `-g`, `--group-prefix` | string, default: `gfff` | Base pueue group name (`gfff` and `gfff-serial`). |
+| `-t`, `--tick` | int, default: `5` | Scheduler poll interval in seconds. |
+| `-o`, `--once` | flag | Queue eligible jobs once, then exit. |
+| `-n`, `--dry-run` | flag | Print commands/actions without executing them. |
+| `-f`, `--force` | flag | Queue runs even when no git updates are detected (and with `--once`, include inactive jobs). |
+| `-C`, `--check` | path | Validate a config file and exit. |
+| `-I`, `--import` | path | Validate and copy config into `~/.config/gfff/`. |
+| `-w`, `--overwrite` | flag | With `--import`, allow replacing an existing target file. |
+| `-a`, `--import-adjust-paths` | flag | With `--import`, rewrite each job `path` to the source config directory. |
+| `--no-dev-fallback` | flag | Exclude development fallback config from discovery. |
+| `--dev-fallback-config` | path | Custom development fallback path for discovery. |
+| `--reload-config-seconds` | int, default: `60` | Reload merged config files every N seconds in scheduler mode (`0` disables reload). |
+| `--error-retry-seconds` | int, default: `300` | Retry failed interval jobs after N seconds (`0` disables fast retry). |
+| `--at-error-retry-seconds` | int, default: `300` | Retry failed daily `at` jobs after N seconds (`0` disables fast retry). |
+| `--disable-when-run` | flag | For each queued job, toggle `active: true` to `active: false` in that job’s source config block. |
+| `job_name` (positional) | string | Restrict execution to one exact job `name`. |
+
+Notes:
+- `--check` and `--import` are mutually exclusive.
+- `--overwrite` and `--import-adjust-paths` require `--import`.
+- `--reload-config-seconds`, `--error-retry-seconds`, and `--at-error-retry-seconds` must be `>= 0`.
+
+### Job config field reference
+
+All supported per-job fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | no | Job identifier used for filtering and deduplication across merged files. |
+| `comment` | string | no | Optional no-op note field; ignored at runtime. |
+| `active` | bool | no | Include job in normal runs when `true` (default behavior treats missing as inactive). |
+| `path` | string | no | Working directory/repo path. If omitted, git update checks are skipped. |
+| `cleanup` | string or list[string] | conditional | Cleanup command(s), executed before `pre-build`/`test`/`build`. |
+| `pre-build` | string or list[string] | no | Command(s) executed after `cleanup` and before `test`/`build`. |
+| `test` | string or list[string] | conditional | Test command(s), executed before `build`. |
+| `build` | string or list[string] | conditional | Build command(s), executed after `test`. |
+| `post-build` | string or list[string] | no | Command(s) executed after `build`. |
+| `run-if` | string or list[string] | no | Gate command(s). Non-zero exit from any command skips that run. |
+| `interval` | int (`> 0`) | exactly one of `interval` / `at` | Run every N seconds. |
+| `at` | `HH:MM` (24-hour) | exactly one of `interval` / `at` | Run daily at local time. |
+| `run-mode` | `normal` \| `manual` \| `scheduled` | no (default `normal`) | Controls whether jobs run in scheduler mode, `--once`, or both. |
+| `disable-when-run` | bool | no (default `false`) | Disable this job in source YAML just before queueing. |
+| `manual-install-cmd` | string | no | Logged manual follow-up command after successful build task completion. |
+| `git-strict` | bool | no (default `true`) | When `false`, git fetch/pull failures skip run instead of failing task. |
+| `git-pull` | string | no (default `git pull --ff-only`) | Pull command used when update conditions are met. |
+| `git-remote-ref` | string | no (default `@{u}`) | Ref used for update detection (for example `origin/main`). |
+| `queue-mode` | `parallel` \| `serial` | no (default resolved via defaults, then `parallel`) | Routes job to shared `gfff` or `gfff-serial` group. |
+
+Validation rules for active jobs:
+- At least one of `cleanup`, `test`, or `build` must be set.
+- Exactly one of `interval` or `at` must be set.
+- Unknown keys are rejected.
+
+### Object-format config fields
+
+When using object-style config files, only these top-level keys are supported:
+
+| Top-level key | Type | Description |
+|---|---|---|
+| `jobs` | list[object] | Job list (same job fields as above). |
+| `defaults` | object | Per-file defaults. Currently supports only `queue-mode`. |
+
+For `~/.config/gfff/defaults.yaml`, only these top-level keys are supported:
+
+| Top-level key | Type | Description |
+|---|---|---|
+| `defaults` | object | Fallback defaults. Currently supports only `queue-mode`. |
+| `overrides` | object | Forced overrides. Currently supports only `queue-mode`. |
 
 ### Tests
 
