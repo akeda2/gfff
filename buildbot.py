@@ -234,6 +234,7 @@ def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
 
     jobs_data: Any
     defaults: Dict[str, Any] = {}
+    object_format = isinstance(data, dict)
     if isinstance(data, list):
         jobs_data = data
     elif isinstance(data, dict):
@@ -282,14 +283,20 @@ def load_yaml_config_document(config_path: Path) -> Dict[str, Any]:
             f"Config defaults in {config_path}",
         )
 
-    return {"jobs": jobs, "defaults": normalized_defaults}
+    return {
+        "jobs": jobs,
+        "defaults": normalized_defaults,
+        "object_format": object_format,
+    }
 
 
 def load_yaml_config(config_path: Path) -> List[Dict[str, Any]]:
     return load_yaml_config_document(config_path)["jobs"]
 
 
-def dump_yaml_jobs(jobs: List[Dict[str, Any]]) -> str:
+def dump_yaml_jobs(
+    jobs: List[Dict[str, Any]], defaults: Optional[Dict[str, Any]] = None
+) -> str:
     try:
         import yaml  # type: ignore
     except ImportError as exc:
@@ -297,7 +304,13 @@ def dump_yaml_jobs(jobs: List[Dict[str, Any]]) -> str:
             "PyYAML is required. Install it with: pip install pyyaml"
         ) from exc
 
-    return yaml.safe_dump(jobs, sort_keys=False, allow_unicode=True)
+    document: Any = jobs
+    if defaults is not None:
+        document = {}
+        if defaults:
+            document["defaults"] = defaults
+        document["jobs"] = jobs
+    return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
 
 
 def rewrite_job_paths_for_import(
@@ -1620,7 +1633,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if args.import_config:
             source_path = Path(args.import_config).expanduser().resolve()
-            source_jobs = load_yaml_config(source_path)
+            source_document = load_yaml_config_document(source_path)
+            source_jobs = source_document["jobs"]
             import_jobs = source_jobs
             if args.import_adjust_paths:
                 import_jobs = rewrite_job_paths_for_import(
@@ -1636,7 +1650,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"Target already exists: {target_path}. Use --overwrite to replace it."
                 )
             if args.import_adjust_paths:
-                target_path.write_text(dump_yaml_jobs(import_jobs), encoding="utf-8")
+                target_path.write_text(
+                    dump_yaml_jobs(
+                        import_jobs,
+                        source_document["defaults"]
+                        if source_document["object_format"]
+                        else None,
+                    ),
+                    encoding="utf-8",
+                )
             else:
                 shutil.copy2(source_path, target_path)
             print(
